@@ -4496,6 +4496,7 @@ namespace driver_bridge
                 close_process_handle_locked();
                 g_pid = 0;
                 g_pid_snapshot.store(0, std::memory_order_release);
+                g_primary_pid = 0;
                 g_process_name.clear();
                 g_has_vm_read = false;
                 g_kernel_attached = false;
@@ -5124,7 +5125,19 @@ namespace driver_bridge
             static_cast<unsigned long long>(target.cached_dtb),
             static_cast<unsigned long long>(active_generation));
         if (!refresh_ok)
+        {
+            if (g_process != nullptr && target.h_process == nullptr)
+            {
+                target.h_process = g_process;
+                g_process = nullptr;
+            }
+            g_pid = 0;
+            g_pid_snapshot.store(0, std::memory_order_release);
+            g_process_name.clear();
+            g_has_vm_read = false;
+            g_kernel_attached = false;
             return false;
+        }
         clear_last_error_locked_after_success("set_active_pid");
         return true;
     }
@@ -5213,6 +5226,7 @@ namespace driver_bridge
                 close_process_handle_locked();
                 g_pid = 0;
                 g_pid_snapshot.store(0, std::memory_order_release);
+                g_active_pid_generation.fetch_add(1, std::memory_order_acq_rel);
                 g_process_name.clear();
                 g_has_vm_read = false;
                 g_kernel_attached = false;

@@ -1049,10 +1049,9 @@ namespace driver_loader
             BOOL terminated = TerminateProcess(pi.hProcess, ERROR_TIMEOUT);
             DWORD terminate_gle = terminated ? ERROR_SUCCESS : GetLastError();
             if (!terminated && hJob) {
-                CloseHandle(hJob);
-                hJob = nullptr;
+                TerminateJobObject(hJob, ERROR_TIMEOUT);
             }
-            DWORD terminate_wait = WaitForSingleObject(pi.hProcess, INFINITE);
+            DWORD terminate_wait = WaitForSingleObject(pi.hProcess, 5000);
             DWORD terminate_wait_gle = terminate_wait == WAIT_FAILED ? GetLastError() : ERROR_SUCCESS;
             loader_diag_fmt("mapper_timeout_terminate_end terminated=%d terminate_gle=%lu wait=0x%08lX wait_gle=%lu",
                 terminated ? 1 : 0,

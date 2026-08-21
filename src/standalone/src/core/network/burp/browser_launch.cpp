@@ -169,6 +169,10 @@ std::string local_appdata_dir()
 
 bool quote_path(const std::string& in, std::wstring& out)
 {
+    if (in.empty() || std::any_of(in.begin(), in.end(), [](unsigned char c) {
+        return c < 0x20 || c == 0x7f || c == '"';
+    }))
+        return false;
     std::wstring w = utf8_to_wide(in);
     if (w.empty()) return false;
     out.clear();
@@ -282,6 +286,17 @@ std::string compute_profile_path(const std::string& subdir)
 {
     std::string sd = subdir.empty() ? std::string("BurpBrowser") : subdir;
     diag::log_tagged_fmt("browser", "compute_profile_path entry subdir=%s", sd.c_str());
+    size_t component_start = 0;
+    while (component_start <= sd.size()) {
+        const size_t component_end = sd.find_first_of("/\\", component_start);
+        const std::string component = sd.substr(component_start,
+            component_end == std::string::npos ? std::string::npos : component_end - component_start);
+        if (component == "." || component == "..")
+            return std::string();
+        if (component_end == std::string::npos)
+            break;
+        component_start = component_end + 1;
+    }
     std::string base = profile_root();
     base += "\\";
     for (char c : sd) {
@@ -440,6 +455,11 @@ bool launch(const browser_launch_config_t& cfg, uint32_t& out_pid)
     if (!st.initialized.load()) initialize();
 
     std::string profile_path = compute_profile_path(cfg.profile_subdir);
+    if (profile_path.empty()) {
+        set_err("invalid browser profile subdirectory");
+        diag::log_tagged_fmt("browser", "launch rejected invalid_profile_subdir=%s", cfg.profile_subdir.c_str());
+        return false;
+    }
     if (cfg.clear_profile_first) {
         diag::log_tagged_fmt("browser", "launch clearing_profile profile=%s policy=camoufox_only", profile_path.c_str());
         remove_directory_recursive(profile_path);

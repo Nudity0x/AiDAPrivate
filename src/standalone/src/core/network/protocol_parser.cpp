@@ -21,6 +21,10 @@
 
 namespace protocol_parser {
 
+namespace {
+constexpr size_t kMaxDecompressedBodyBytes = 64u * 1024u * 1024u;
+}
+
 
 static std::string to_lower(const std::string& s) {
     std::string r = s;
@@ -678,7 +682,11 @@ std::vector<uint8_t> decompress_body(const std::vector<uint8_t>& body, const std
         }
 
         std::vector<uint8_t> result;
-        result.reserve(body.size() * 4);
+        if (body.size() > kMaxDecompressedBodyBytes / 4) {
+            result.reserve(kMaxDecompressedBodyBytes);
+        } else {
+            result.reserve(body.size() * 4);
+        }
 
         uint8_t out_buf[16384];
         int ret;
@@ -692,6 +700,11 @@ std::vector<uint8_t> decompress_body(const std::vector<uint8_t>& body, const std
                 return body;
             }
             size_t have = sizeof(out_buf) - strm.avail_out;
+            if (have > kMaxDecompressedBodyBytes - result.size()) {
+                diag::log_tagged_fmt("proto", "decompress_body output_limit input=%zu limit=%zu", body.size(), kMaxDecompressedBodyBytes);
+                inflateEnd(&strm);
+                return body;
+            }
             result.insert(result.end(), out_buf, out_buf + have);
         } while (ret != Z_STREAM_END);
 
@@ -702,7 +715,11 @@ std::vector<uint8_t> decompress_body(const std::vector<uint8_t>& body, const std
 
     if (enc == "br") {
         diag::log_tagged_fmt("proto", "decompress_body brotli branch input=%zu", body.size());
-        size_t decoded_size = body.size() * 4;
+        if (body.size() > kMaxDecompressedBodyBytes / 4) {
+            diag::log_tagged_fmt("proto", "decompress_body brotli_input_limit input=%zu", body.size());
+            return body;
+        }
+        size_t decoded_size = (std::min)(body.size() * 4, kMaxDecompressedBodyBytes);
         std::vector<uint8_t> result;
         result.resize(decoded_size);
 
@@ -723,7 +740,12 @@ std::vector<uint8_t> decompress_body(const std::vector<uint8_t>& body, const std
             br_res = BrotliDecoderDecompressStream(bs, &avail_in, &next_in, &avail_out, &next_out, &total_out);
             if (br_res == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT) {
                 size_t off = next_out - result.data();
-                result.resize(result.size() * 2);
+                if (result.size() >= kMaxDecompressedBodyBytes / 2) {
+                    diag::log_tagged_fmt("proto", "decompress_body brotli_output_limit input=%zu limit=%zu", body.size(), kMaxDecompressedBodyBytes);
+                    BrotliDecoderDestroyInstance(bs);
+                    return body;
+                }
+                result.resize((std::min)(result.size() * 2, kMaxDecompressedBodyBytes));
                 next_out = result.data() + off;
                 avail_out = result.size() - off;
             }
@@ -971,6 +993,8 @@ static uint32_t hpack_decode_integer(const uint8_t* data, size_t len, size_t& po
     while (pos < len) {
         uint8_t b = data[pos];
         pos++;
+        if (m >= 32 || (static_cast<uint32_t>(b & 0x7F) > (std::numeric_limits<uint32_t>::max() - value) >> m))
+            return 0;
         value += static_cast<uint32_t>(b & 0x7F) << m;
         m += 7;
         if ((b & 0x80) == 0) break;
