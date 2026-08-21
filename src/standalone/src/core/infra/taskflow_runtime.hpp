@@ -1279,6 +1279,7 @@ inline void execute_graph_node(const std::shared_ptr<job_record_t>& record, std:
     }
     clear_active_slot(*record->pool, active_id);
     record->pool->active_tasks.fetch_sub(1u, std::memory_order_acq_rel);
+    decrement_atomic_if_nonzero(record->pool->pending_tasks);
     diag::log_tagged_fmt(safe_log_tag(*record->pool),
         "taskflow_graph_node_finish job_id=%llu node_id=%llu state=%s label=%s owner=%s domain=%s err=%.300s tid=%lu",
         static_cast<unsigned long long>(record->id),
@@ -2052,12 +2053,12 @@ inline bool cooperative_cancel_requested(job_handle_t handle) {
 inline wait_result_t wait_for(job_handle_t handle, std::uint32_t timeout_ms) {
     wait_result_t result;
     if (!handle.valid()) {
-        result.completed = true;
+        result.rejected = true;
         return result;
     }
     auto record = find_job(handle.id);
     if (!record) {
-        result.completed = true;
+        result.rejected = true;
         return result;
     }
     std::unique_lock<std::mutex> lk(record->mtx);

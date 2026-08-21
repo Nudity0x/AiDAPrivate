@@ -504,7 +504,7 @@ wchar_t g_aidaClassName[128] = L"AiDA";
 static constexpr const wchar_t* kAidaWindowTitle = g_aidaWindowTitle;
 static constexpr int kAidaFullTestHotkeyId = 0xA1DA;
 static constexpr UINT kAidaUiDispatcherWakeMessage = WM_APP + 0x1DB;
-static constexpr UINT kAidaQueuedPeekFlags = PM_REMOVE | PM_QS_INPUT | PM_QS_POSTMESSAGE | PM_QS_PAINT | PM_QS_SENDMESSAGE;
+static constexpr UINT kAidaQueuedPeekFlags = PM_REMOVE | PM_QS_INPUT | PM_QS_POSTMESSAGE | PM_QS_PAINT | PM_QS_TIMER | PM_QS_SENDMESSAGE;
 static constexpr UINT kAidaSendOnlyPeekFlags = PM_REMOVE | PM_QS_SENDMESSAGE;
 static constexpr DWORD kAidaNonSendQueueBits = QS_INPUT | QS_POSTMESSAGE | QS_TIMER | QS_PAINT | QS_HOTKEY | QS_ALLPOSTMESSAGE;
 static constexpr DWORD kAidaPumpQueueBits = kAidaNonSendQueueBits | QS_SENDMESSAGE;
@@ -6581,6 +6581,8 @@ int main(int, char**)
         }
         const bool executor_stopped = aida::infra::executor::shutdown(INFINITE);
         diag::log_tagged_critical_fmt("main", "partial_startup_executor_shutdown complete=%d", executor_stopped ? 1 : 0);
+        if (hwnd && IsWindow(hwnd))
+            ::DestroyWindow(hwnd);
         if (g_imgui_dx11_initialized) {
             ImGui_ImplDX11_Shutdown();
             g_imgui_dx11_initialized = false;
@@ -6596,8 +6598,6 @@ int main(int, char**)
             blend_state = nullptr;
         }
         CleanupDeviceD3D();
-        if (hwnd && IsWindow(hwnd))
-            ::DestroyWindow(hwnd);
         if (g_aidaWindowIcon) {
             DestroyIcon(g_aidaWindowIcon);
             g_aidaWindowIcon = nullptr;
@@ -8544,6 +8544,10 @@ int main(int, char**)
         executor_stopped = aida::infra::executor::shutdown(INFINITE);
     }
     diag::log_tagged_critical_fmt("main", "shutdown_executor_done complete=%d", executor_stopped ? 1 : 0);
+    aida_shutdown_diag::mark("shutdown_destroy_window");
+    if (hwnd && IsWindow(hwnd))
+        ::DestroyWindow(hwnd);
+    diag::log_tagged_critical("main", "shutdown_destroy_window_done");
     aida_shutdown_diag::mark("shutdown_imgui_dx11");
     if (aida::ui_thread::require_owner("dx11", "imgui_dx11_shutdown", "shutdown"))
         ImGui_ImplDX11_Shutdown();
@@ -8567,13 +8571,10 @@ int main(int, char**)
     }
     CleanupDeviceD3D();
     diag::log_tagged_critical("main", "shutdown_d3d_done");
-    aida_shutdown_diag::mark("shutdown_destroy_window");
-    ::DestroyWindow(hwnd);
     if (g_aidaWindowIcon) {
         DestroyIcon(g_aidaWindowIcon);
         g_aidaWindowIcon = nullptr;
     }
-    diag::log_tagged_critical("main", "shutdown_destroy_window_done");
     aida_shutdown_diag::mark("shutdown_unregister_class");
     ::UnregisterClassW(wc.lpszClassName, wc.hInstance);
     diag::log_tagged_critical("main", "shutdown_unregister_done");
@@ -8914,6 +8915,7 @@ LRESULT WINAPI WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 
     if (msg == WM_NCDESTROY) {
         aida::ui_thread::mark_window_destroying(hWnd, "wndproc", "wm_ncdestroy", "enter");
+        return finish("ncdestroy", ::DefWindowProcW(hWnd, msg, wParam, lParam));
     }
 
     if (trace_input_msg) {

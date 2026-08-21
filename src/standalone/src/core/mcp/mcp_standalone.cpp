@@ -12667,18 +12667,12 @@ static tool_result_t invoke_tool_with_concurrency_policy(
     }
 
     if (explicit_target && !session_manager) {
-        if (!tool.workspace_handler) {
-            auto workspace = analysis_session::active_workspace();
-            if (workspace && !workspace->closing() && !workspace->closed()) {
-                set_tool_metrics_lane(metrics, "shared_workspace_read", 0);
-                return invoke_tool_with_registry_scope(tool, arguments, handler, metrics, "shared_workspace_read");
-            }
-        }
         set_tool_metrics_lane(metrics, "explicit_target_workspace_handler_required", 0);
         diag::log_tagged_fmt("mcp_srv",
-            "tool_policy_lane tool='%s' lane=explicit_target_workspace_handler_required read_only=%d explicit_target=1 disposition=not_started",
+            "tool_policy_lane tool='%s' lane=explicit_target_workspace_handler_required read_only=%d explicit_target=1 workspace_handler=0 target_shape='%s' disposition=not_started",
             tool.name.c_str(),
-            tool.read_only ? 1 : 0);
+            tool.read_only ? 1 : 0,
+            payload_shape_summary(target_arguments).c_str());
         return tool_result_t::error(
             "Explicit workspace targets require a workspace_handler; migrate this tool before targeting a workspace.",
             "TARGET_WORKSPACE_HANDLER_REQUIRED",
@@ -15029,10 +15023,19 @@ json server_t::route_request(const json& msg)
         return make_error(nullptr, JSONRPC_INVALID_REQUEST, "Request must be a JSON object");
 
     std::string method = msg.value("method", "");
-    diag::log_tagged_fmt("mcp_srv", "route_request method='%s'", method.c_str());
+    diag::log_tagged_fmt("mcp_srv", "route_request method='%s' request_id='%s' params_type='%s' payload_bytes=%zu",
+        method.c_str(), request_id_string(msg.contains("id") ? msg["id"] : json(nullptr)).c_str(),
+        payload_shape_summary(msg.value("params", json::object())).c_str(), msg.dump().size());
     json id     = msg.contains("id") ? msg["id"] : json(nullptr);
     json params = msg.value("params", json::object());
     bool is_notification = !msg.contains("id");
+    if (!params.is_object() && !params.is_null()) {
+        diag::log_tagged_fmt("mcp_srv", "route_request invalid_params_type method='%s' request_id='%s' params_type='%s' payload_bytes=%zu",
+            method.c_str(), request_id_string(id).c_str(), payload_shape_summary(params).c_str(), msg.dump().size());
+        if (is_notification)
+            return json();
+        return make_error(id, JSONRPC_INVALID_PARAMS, "The 'params' field must be a JSON object.");
+    }
     std::string route_tool_name;
     if (method == "tools/call" && params.is_object() && params.contains("name") && params["name"].is_string())
         route_tool_name = params["name"].get<std::string>();
@@ -15165,8 +15168,13 @@ json server_t::route_request(const json& msg)
     if (method == "prompts/list")             return handle_prompts_list(id, params);
     if (method == "prompts/get")              return handle_prompts_get(id, params);
     if (method == "notifications/cancelled") {
+        bool signalled = false;
         if (params.is_object() && params.contains("requestId"))
-            signal_in_flight_cancel(params["requestId"]);
+            signalled = signal_in_flight_cancel(params["requestId"]);
+        diag::log_tagged_fmt("mcp_srv", "cancel_notification request_id='%s' has_request_id=%d signalled=%d params_type='%s'",
+            request_id_string(params.is_object() && params.contains("requestId") ? params["requestId"] : json(nullptr)).c_str(),
+            params.is_object() && params.contains("requestId") ? 1 : 0, signalled ? 1 : 0,
+            payload_shape_summary(params).c_str());
         return json();
     }
     if (method == "logging/setLevel")
@@ -15184,6 +15192,8 @@ std::string handle_body(server_t* self, const std::string& body, const std::func
     json parsed;
     try { parsed = json::parse(body); }
     catch (const json::parse_error& e) {
+        diag::log_tagged_fmt("mcp_srv", "json_parse_error body_bytes=%zu byte=%zu what='%s'",
+            body.size(), static_cast<std::size_t>(e.byte), e.what());
         return json_dump_safe(self->make_error(nullptr, JSONRPC_PARSE_ERROR,
             std::string("JSON parse error: ") + e.what()));
     }
