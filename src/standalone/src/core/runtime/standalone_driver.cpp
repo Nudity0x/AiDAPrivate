@@ -4461,6 +4461,12 @@ namespace driver_bridge
             return false;
         }
 
+        diag::log_tagged_critical("driver", "attach_pre_set_process_id");
+        if (!device->set_process_id(pid)) {
+            set_last_error_locked("WhosWho failed to bind PID " + std::to_string(pid));
+            return false;
+        }
+
         close_process_handle_locked();
         g_process = process.release();
         g_pid = pid;
@@ -4480,8 +4486,6 @@ namespace driver_bridge
             }
         }
 
-        diag::log_tagged_critical_fmt("driver", "attach_pre_set_process_id active_generation=%llu", static_cast<unsigned long long>(active_generation));
-        device->set_process_id(pid);
         diag::log_tagged_critical("driver", "attach_post_set_process_id");
 
         {
@@ -4493,6 +4497,7 @@ namespace driver_bridge
                 diag::log_tagged_critical_fmt("driver",
                     "attach_device_solve_dtb_zero connected=%d",
                     device->is_connected() ? 1 : 0);
+                const bool context_cleared = device->clear_process_context();
                 close_process_handle_locked();
                 g_pid = 0;
                 g_pid_snapshot.store(0, std::memory_order_release);
@@ -4500,11 +4505,11 @@ namespace driver_bridge
                 g_process_name.clear();
                 g_has_vm_read = false;
                 g_kernel_attached = false;
-                device->clear_process_context();
                 device->set_dtb(0);
                 device->set_kernel_dtb(0);
                 device->set_base_address(0);
-                set_last_error_locked("WhosWho failed to resolve DTB for PID " + std::to_string(pid));
+                set_last_error_locked(std::string("WhosWho failed to resolve DTB for PID ") +
+                    std::to_string(pid) + (context_cleared ? "" : "; allocation release failed"));
                 return false;
             }
             diag::log_tagged_critical("driver", "attach_pre_device_find_image_fallback");
@@ -4584,6 +4589,10 @@ namespace driver_bridge
 
         std::lock_guard<std::mutex> lk(g_state_mtx);
         uint32_t prev_pid = g_pid;
+        if (g_kernel_mode && device && device->is_connected() && !device->clear_process_context()) {
+            set_last_error_locked("WhosWho failed to release active process allocation");
+            return;
+        }
         close_process_handle_locked();
         g_pid = 0;
         g_primary_pid = 0;
@@ -4592,9 +4601,6 @@ namespace driver_bridge
         g_process_name.clear();
         g_has_vm_read = false;
         g_kernel_attached = false;
-        if (g_kernel_mode && device && device->is_connected()) {
-            device->clear_process_context();
-        }
         if (prev_pid != 0) {
             auto it = g_processes.find(prev_pid);
             if (it != g_processes.end()) {
@@ -4853,7 +4859,16 @@ namespace driver_bridge
             device->set_base_address(0);
         }
 
-        device->set_process_id(pid);
+        if (!device->set_process_id(pid)) {
+            if (device_pid_before != 0 && device_pid_before != pid) {
+                device->set_process_id(device_pid_before);
+                device->set_dtb(dtb_before);
+                device->set_kernel_dtb(kernel_dtb_before);
+                device->set_base_address(base_before);
+            }
+            ctx.kernel_attached = false;
+            return false;
+        }
         diag::log_tagged_fmt("driver",
             "refresh_kernel_context_device_set_pid op=%s pid=%u device_pid_after=%u shellcode_after=0x%llX shellcode_pid_after=%u shellcode_dtb_after=0x%llX",
             op_label,
@@ -5022,6 +5037,9 @@ namespace driver_bridge
             return false;
         }
         const uint32_t switching_from_pid = g_pid;
+        const std::string switching_from_name = g_process_name;
+        const bool switching_from_vm_read = g_has_vm_read;
+        const bool switching_from_kernel_attached = g_kernel_attached;
         lk.unlock();
         lower_remote_call_drain_result_t drain{};
         if (switching_from_pid != 0 && switching_from_pid != pid)
@@ -5131,11 +5149,28 @@ namespace driver_bridge
                 target.h_process = g_process;
                 g_process = nullptr;
             }
-            g_pid = 0;
-            g_pid_snapshot.store(0, std::memory_order_release);
-            g_process_name.clear();
-            g_has_vm_read = false;
-            g_kernel_attached = false;
+            g_pid = switching_from_pid;
+            g_pid_snapshot.store(switching_from_pid, std::memory_order_release);
+            g_process_name = switching_from_name;
+            g_has_vm_read = switching_from_vm_read;
+            g_kernel_attached = switching_from_kernel_attached;
+            if (switching_from_pid != 0) {
+                auto previous_it = g_processes.find(switching_from_pid);
+                if (previous_it != g_processes.end()) {
+                    g_process = previous_it->second.h_process;
+                    previous_it->second.h_process = nullptr;
+                    if (kernel_mode) {
+                        device->set_process_id(switching_from_pid);
+                        device->set_dtb(previous_it->second.cached_dtb);
+                        device->set_kernel_dtb(previous_it->second.cached_kernel_dtb);
+                        device->set_base_address(previous_it->second.cached_image_base);
+                    }
+                }
+            }
+            diag::log_tagged_critical_fmt("driver", "set_active_pid_rollback target_pid=%u restored_pid=%u generation=%llu",
+                pid,
+                switching_from_pid,
+                static_cast<unsigned long long>(g_active_pid_generation.load(std::memory_order_acquire)));
             return false;
         }
         clear_last_error_locked_after_success("set_active_pid");

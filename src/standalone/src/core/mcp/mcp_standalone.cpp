@@ -410,6 +410,18 @@ namespace
             registry.lifetimes.erase(it);
     }
 
+    static void erase_server_worker_lifetime(const std::shared_ptr<server_worker_lifetime_t>& state)
+    {
+        auto& registry = server_worker_lifetime_registry();
+        std::lock_guard<std::mutex> lk(registry.mtx);
+        for (auto it = registry.lifetimes.begin(); it != registry.lifetimes.end(); ++it) {
+            if (it->second == state) {
+                registry.lifetimes.erase(it);
+                return;
+            }
+        }
+    }
+
     static void mark_server_worker_start(const std::shared_ptr<server_worker_lifetime_t>& state, bool succeeded)
     {
         if (!state)
@@ -4776,12 +4788,19 @@ namespace
 
     std::string cancel_key_for_id(const json& id)
     {
-        if (id.is_null())              return std::string{"\1null"};
-        if (id.is_string())            return std::string{"s:"} + id.get<std::string>();
-        if (id.is_number_integer())    return std::string{"i:"} + std::to_string(id.get<long long>());
-        if (id.is_number_unsigned())   return std::string{"u:"} + std::to_string(id.get<unsigned long long>());
-        if (id.is_number_float())      return std::string{"f:"} + std::to_string(id.get<double>());
-        return std::string{"j:"} + id.dump();
+        std::string key = tls_route_identity.session_hash.empty()
+            ? tls_route_identity.principal_id
+            : tls_route_identity.session_hash;
+        if (key.empty())
+            key = "<none>";
+        key.push_back('\x1f');
+        if (id.is_null())              key += "null";
+        else if (id.is_string())       key += std::string{"s:"} + id.get<std::string>();
+        else if (id.is_number_integer()) key += std::string{"i:"} + std::to_string(id.get<long long>());
+        else if (id.is_number_unsigned()) key += std::string{"u:"} + std::to_string(id.get<unsigned long long>());
+        else if (id.is_number_float()) key += std::string{"f:"} + std::to_string(id.get<double>());
+        else                            key += std::string{"j:"} + id.dump();
+        return key;
     }
 
     void register_in_flight_call_token(const json& id, const cancel_token_ptr_t& token)
@@ -4840,6 +4859,21 @@ namespace
         if (signal_batch_reservation_cancels(id))
             signalled = true;
         return signalled;
+    }
+
+    void signal_all_in_flight_cancels() noexcept
+    {
+        std::vector<cancel_token_ptr_t> tokens;
+        try {
+            std::lock_guard<std::mutex> lk(g_in_flight_mutex);
+            for (const auto& entry : g_in_flight_cancels)
+                tokens.insert(tokens.end(), entry.second.begin(), entry.second.end());
+            g_in_flight_cancels.clear();
+        } catch (...) {
+            return;
+        }
+        for (const auto& token : tokens)
+            signal_call_cancel_token(token);
     }
 
     struct cancel_scope_t
@@ -5325,18 +5359,48 @@ namespace
 
 }
 
-server_t::server_t()  = default;
+struct server_t::shared_state_t
+{
+    tool_registry_t registry;
+    std::atomic<bool> server_done{true};
+    std::atomic<bool> running{false};
+    std::atomic<bool> stop_requested{false};
+    void* active_server = nullptr;
+    std::mutex server_mtx;
+    std::atomic<std::uint32_t> server_worker_tid{0};
+    std::mutex local_capability_mtx;
+    std::string local_capability;
+    std::string local_run_binding;
+    std::atomic<int> port{0};
+};
+
+server_t::server_t()
+    : server_t(std::make_shared<shared_state_t>(), true)
+{
+}
+
+server_t::server_t(std::shared_ptr<shared_state_t> state, bool owns_lifecycle)
+    : _state(std::move(state))
+    , _owns_lifecycle(owns_lifecycle)
+    , _registry(_state->registry)
+    , _server_done(_state->server_done)
+    , _running(_state->running)
+    , _stop_requested(_state->stop_requested)
+    , _active_server(_state->active_server)
+    , _server_mtx(_state->server_mtx)
+    , _server_worker_tid(_state->server_worker_tid)
+    , _local_capability_mtx(_state->local_capability_mtx)
+    , _local_capability(_state->local_capability)
+    , _local_run_binding(_state->local_run_binding)
+    , _port(_state->port)
+{
+}
+
 server_t::~server_t()
 {
-    if (server_worker_is_current(this)) {
-        diag::log_tagged_fmt("mcp_srv", "destruction rejected on server worker disposition=external_owner_required");
-        std::terminate();
-    }
+    if (!_owns_lifecycle)
+        return;
     stop();
-    if (find_server_worker_lifetime(this)) {
-        diag::log_tagged_fmt("mcp_srv", "destruction rejected before server worker join disposition=lifetime_retained");
-        std::terminate();
-    }
 }
 
 void register_c03_compatibility_tools(server_t& server)
@@ -15364,6 +15428,8 @@ std::string handle_body(server_t* self, const std::string& body, const std::func
                     continue;
                 }
                 const json& item = parsed[i];
+                if (!item.is_object() || !item.contains("id"))
+                    continue;
                 json item_id = item.is_object() && item.contains("id") ? item["id"] : json(nullptr);
                 json err = self->make_error(item_id, -32074, "JSON-RPC batch reservation failed; item was not started.");
                 err["error"]["data"] = {
@@ -15393,6 +15459,8 @@ std::string handle_body(server_t* self, const std::string& body, const std::func
                     continue;
                 }
                 const json& item = parsed[i];
+                if (!item.is_object() || !item.contains("id"))
+                    continue;
                 json item_id = item.is_object() && item.contains("id") ? item["id"] : json(nullptr);
                 json err = self->make_error(item_id, -32074, "JSON-RPC batch reservation failed; item was not started.");
                 err["error"]["data"] = {
@@ -15556,6 +15624,8 @@ std::string handle_body(server_t* self, const std::string& body, const std::func
             scoped_pre_dispatch_validation_t validation_scope(pre_dispatch_validated);
             try {
                 json response = self->route_request(item);
+                if (!item.contains("id"))
+                    response = json();
                 complete_item(index, std::move(response));
             } catch (const std::exception& ex) {
                 diag::log_tagged_fmt("mcp_srv",
@@ -15563,15 +15633,15 @@ std::string handle_body(server_t* self, const std::string& body, const std::func
                     static_cast<unsigned long long>(batch_id),
                     index,
                     ex.what());
-                json id = item.is_object() && item.contains("id") ? item["id"] : json(nullptr);
-                complete_item(index, self->make_error(id, JSONRPC_INTERNAL_ERROR, std::string("Request failed: ") + ex.what()));
+                if (item.is_object() && item.contains("id"))
+                    complete_item(index, self->make_error(item["id"], JSONRPC_INTERNAL_ERROR, std::string("Request failed: ") + ex.what()));
             } catch (...) {
                 diag::log_tagged_fmt("mcp_srv",
                     "jsonrpc_batch_item_exception batch=%llu index=%zu err='<unknown>'",
                     static_cast<unsigned long long>(batch_id),
                     index);
-                json id = item.is_object() && item.contains("id") ? item["id"] : json(nullptr);
-                complete_item(index, self->make_error(id, JSONRPC_INTERNAL_ERROR, "Request failed"));
+                if (item.is_object() && item.contains("id"))
+                    complete_item(index, self->make_error(item["id"], JSONRPC_INTERNAL_ERROR, "Request failed"));
             }
         };
 
@@ -15736,6 +15806,8 @@ std::string handle_body(server_t* self, const std::string& body, const std::func
                     try {
                         scoped_mcp_route_identity_t route_identity(batch_identity);
                         json response = self->route_request(item);
+                        if (!item.contains("id"))
+                            response = json();
                         complete_item(i, std::move(response));
                     } catch (const std::exception& ex) {
                         diag::log_tagged_fmt("mcp_srv",
@@ -15958,34 +16030,38 @@ bool server_t::start(int port)
         return false;
     }
 
-    auto worker_body = [this, port, worker_lifetime]() {
+    auto worker_owner = std::shared_ptr<server_t>(new server_t(_state, false));
+    auto worker_body = [worker_owner, port, worker_lifetime]() {
+        server_t* self = worker_owner.get();
+        const auto cleanup = [self, worker_lifetime]() {
+            self->_running.store(false, std::memory_order_release);
+            self->clear_local_capability();
+            self->_server_worker_tid.store(0, std::memory_order_release);
+            self->_server_done.store(true, std::memory_order_release);
+            worker_lifetime->worker_tid.store(0, std::memory_order_release);
+            erase_server_worker_lifetime(worker_lifetime);
+        };
         const DWORD tid = GetCurrentThreadId();
         worker_lifetime->worker_tid.store(static_cast<std::uint32_t>(tid), std::memory_order_release);
-        _server_worker_tid.store(static_cast<std::uint32_t>(tid), std::memory_order_release);
+        self->_server_worker_tid.store(static_cast<std::uint32_t>(tid), std::memory_order_release);
         diag::log_tagged_fmt("mcp_srv", "server_worker starting port=%d tid=%lu", port, static_cast<unsigned long>(tid));
         log_runtime_executor_stats("server_worker entry");
-        if (_stop_requested.load(std::memory_order_acquire)) {
+        if (self->_stop_requested.load(std::memory_order_acquire)) {
             diag::log_tagged_fmt("mcp_srv", "server_worker cancelled before listen port=%d tid=%lu", port, static_cast<unsigned long>(tid));
-            clear_local_capability();
-            _server_worker_tid.store(0, std::memory_order_release);
-            _server_done.store(true, std::memory_order_release);
-            worker_lifetime->worker_tid.store(0, std::memory_order_release);
+            cleanup();
             return;
         }
         try {
-            server_thread_func(port);
+            self->server_thread_func(port);
         } catch (const std::exception& ex) {
             diag::log_tagged_fmt("mcp_srv", "server_worker exception port=%d err='%s'", port, ex.what());
-            _running.store(false, std::memory_order_release);
+            self->_running.store(false, std::memory_order_release);
         } catch (...) {
             diag::log_tagged_fmt("mcp_srv", "server_worker exception port=%d err='<unknown>'", port);
-            _running.store(false, std::memory_order_release);
+            self->_running.store(false, std::memory_order_release);
         }
-        clear_local_capability();
         diag::log_tagged_fmt("mcp_srv", "server_worker exited port=%d tid=%lu", port, static_cast<unsigned long>(GetCurrentThreadId()));
-        _server_worker_tid.store(0, std::memory_order_release);
-        _server_done.store(true, std::memory_order_release);
-        worker_lifetime->worker_tid.store(0, std::memory_order_release);
+        cleanup();
     };
     std::string worker_err;
     mcp_standalone::downstream::governor_t::instance().clear_shutdown();
@@ -16009,7 +16085,7 @@ bool server_t::start(int port)
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
 
     diag::log_tagged_fmt("mcp_srv", "start result running=%d port=%d",
-        (int)_running.load(), _port);
+        (int)_running.load(), _port.load(std::memory_order_acquire));
     if (!_running.load(std::memory_order_acquire))
         mcp_standalone::downstream::governor_t::instance().request_shutdown();
     return _running.load();
@@ -16042,6 +16118,7 @@ void server_t::stop()
         return;
     }
     _stop_requested = true;
+    signal_all_in_flight_cancels();
     mcp_standalone::downstream::governor_t::instance().request_shutdown();
     release_all_stream_slots("stop_requested");
     mcp_lease_registry_shutdown_cleanup("stop_requested");
@@ -16180,7 +16257,7 @@ void server_t::server_thread_func(int port)
         auth_input.origin = req.get_header_value("Origin");
         auth_input.authorization = req.get_header_value("Authorization");
         auth_input.run_binding = req.get_header_value("X-AiDA-MCP-Run-Id");
-        auth_input.bound_port = _port;
+        auth_input.bound_port = _port.load(std::memory_order_acquire);
         const auto auth = authorize_local_request(
             auth_input, local_capability, run_binding);
         if (!auth_input.authorization.empty())
@@ -16529,7 +16606,7 @@ void server_t::server_thread_func(int port)
         proof["challenge"] = request.value("challenge", std::string());
         proof["plugin_pid"] = plugin_pid;
         proof["standalone_pid"] = static_cast<uint32_t>(GetCurrentProcessId());
-        proof["mcp_port"] = static_cast<uint32_t>(_port);
+        proof["mcp_port"] = static_cast<uint32_t>(_port.load(std::memory_order_acquire));
         proof["issued_tick_ms"] = now_tick;
         proof["expires_tick_ms"] = now_tick + 15000ull;
         proof["lifecycle_ready"] = g_ide_lifecycle_ready.load(std::memory_order_acquire);
@@ -16584,7 +16661,7 @@ void server_t::server_thread_func(int port)
         health["server"]      = SERVER_NAME;
         health["version"]     = SERVER_VERSION;
         health["pid"]         = static_cast<std::uint32_t>(GetCurrentProcessId());
-        health["port"]        = _port;
+        health["port"]        = _port.load(std::memory_order_acquire);
         health["authenticated"] = lifecycle_ready;
         health["lifecycle_ready"] = lifecycle_ready;
         health["tools_count"] = g_cached_external_tool_count.load(std::memory_order_acquire);
@@ -16609,7 +16686,7 @@ void server_t::server_thread_func(int port)
         mcp_capacity_snapshot_state_t capacity_state;
         capacity_state.timestamp_ms = mcp_now_ms();
         health["executors"] = mcp_executor_health_snapshot(&capacity_state);
-        health["capacity"] = capacity_health_snapshot(current_mcp_principal(), session_id, _port, capacity_state);
+        health["capacity"] = capacity_health_snapshot(current_mcp_principal(), session_id, _port.load(std::memory_order_acquire), capacity_state);
         health["lease_registry"] = mcp_lease_registry_bounded_snapshot(16, 16);
         health["lease_registry_owner"] = mcp_lease_registry_lock_owner_diagnostics_json();
         health["reserved_lanes"] = mcp_reserved_lanes_health_snapshot();
@@ -17192,6 +17269,8 @@ void server_t::server_thread_func(int port)
         cleanup_sse_sessions("before_open");
         auto session = std::make_shared<sse_session_t>();
         session->id = generate_session_id();
+        session->remote_address = req.remote_addr;
+        session->principal_id = current_mcp_principal();
         if (session->id.empty()) {
             res.status = 503;
             res.set_content(R"({"status":"rejected","error":"MCP session entropy unavailable","code":"MCP_SESSION_ENTROPY_UNAVAILABLE","disposition":"not_started"})", "application/json");
@@ -17386,6 +17465,13 @@ void server_t::server_thread_func(int port)
               res.status = 404;
               res.set_content(json_dump_safe(make_error(nullptr,
                   JSONRPC_INVALID_REQUEST, "Unknown or expired session: " + sid)), "application/json");
+              return;
+          }
+          if (it->second->remote_address != req.remote_addr ||
+              it->second->principal_id != current_mcp_principal()) {
+              res.status = 403;
+              res.set_content(json_dump_safe(make_error(nullptr,
+                  JSONRPC_INVALID_REQUEST, "SSE session is bound to another local client")), "application/json");
               return;
           }
           session = it->second;
@@ -17934,7 +18020,7 @@ void server_t::write_client_configs() const
         return;
     }
 
-    std::string port_str = std::to_string(_port);
+    std::string port_str = std::to_string(_port.load(std::memory_order_acquire));
     std::string http_url = "http://127.0.0.1:" + port_str + "/mcp";
     std::string sse_url = "http://127.0.0.1:" + port_str + "/sse";
     std::string capability;
