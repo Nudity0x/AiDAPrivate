@@ -1471,6 +1471,7 @@ if(WIN32)
             "${STANDALONE_ROOT}/core/mcp/ida_compat_read.cpp"
             "${STANDALONE_ROOT}/core/mcp/ida_compat_mut.cpp"
             "${STANDALONE_ROOT}/core/mcp/calculator_tool.cpp"
+            "${STANDALONE_ROOT}/core/mcp/calculator_engine.cpp"
             "${STANDALONE_ROOT}/core/mcp/schema_validator.cpp"
             "${STANDALONE_ROOT}/core/network/protocol_parser.cpp"
             "${STANDALONE_ROOT}/core/network/cert_generator.cpp"
