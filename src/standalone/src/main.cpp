@@ -8468,12 +8468,17 @@ int main(int, char**)
         diag::log_tagged_critical_fmt("main", "shutdown_queue_snapshot_pre %s", queue_snapshot);
     }
     aida_shutdown_diag::mark("shutdown_testlab_cancel");
-    test_all_features::cancel_tests();
+    test_all_features::cancel_tests_for_shutdown();
     diag::log_tagged_critical("main", "shutdown_testlab_cancel_done");
     aida_shutdown_diag::mark("shutdown_camoufox_force_cleanup");
     try {
-        aida::burp::camoufox::force_cleanup("main.shutdown_sequence");
-        diag::log_tagged_critical("main", "shutdown_camoufox_force_cleanup_done");
+        bool cleanup_complete = false;
+        for (unsigned attempt = 0; attempt < 20 && !cleanup_complete; ++attempt) {
+            cleanup_complete = aida::burp::camoufox::force_cleanup("main.shutdown_sequence");
+            if (!cleanup_complete)
+                ::Sleep(100);
+        }
+        diag::log_tagged_critical_fmt("main", "shutdown_camoufox_force_cleanup_done complete=%d", cleanup_complete ? 1 : 0);
     } catch (...) {
         aida::diagnostics::crash::emit_crash_breadcrumb(0xE06D7363u, nullptr, "shutdown_camoufox_force_cleanup");
         diag::log_tagged_critical("main", "shutdown_camoufox_force_cleanup_exception");

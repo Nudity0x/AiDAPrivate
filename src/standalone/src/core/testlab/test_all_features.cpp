@@ -149,6 +149,7 @@ namespace test_all_features {
 
 		std::atomic<bool> g_running{ false };
 		std::atomic<bool> g_start_queued{ false };
+		std::atomic<bool> g_shutdown_cancel_requested{ false };
 		std::atomic<bool> g_cancel_requested{ false };
 		std::atomic<bool> g_interactive_cancel_cleanup_inflight{ false };
 		std::atomic<bool> g_target_unavailable{ false };
@@ -4519,6 +4520,10 @@ namespace test_all_features {
 		}
 
 		bool start_tests_impl() {
+			if (g_shutdown_cancel_requested.load(std::memory_order_acquire)) {
+				diag::log_tagged("test_all", "start_tests rejected: shutdown requested");
+				return false;
+			}
 			bool expected = false;
 			if (!g_running.compare_exchange_strong(expected, true)) {
 				char snap[1200] = {};
@@ -4533,7 +4538,7 @@ namespace test_all_features {
 				return false;
 			}
 
-			g_cancel_requested.store(false);
+			g_cancel_requested.store(false, std::memory_order_release);
 			g_target_unavailable.store(false);
 			g_total.store(0);
 			g_current.store(0);
@@ -4655,6 +4660,11 @@ namespace test_all_features {
 
 		bool queue_start_tests_impl(const char* source) {
 			const char* tag = source && source[0] ? source : "start_tests";
+			if (g_shutdown_cancel_requested.load(std::memory_order_acquire)) {
+				set_phase("Cancelling...");
+				set_step("start rejected during shutdown");
+				return false;
+			}
 			if (g_running.load(std::memory_order_acquire)) {
 				char snap[1200] = {};
 				format_debug_snapshot_impl(snap, sizeof(snap));
@@ -4678,6 +4688,12 @@ namespace test_all_features {
 					flush_full_test_log(hf);
 					CloseHandle(hf);
 				}
+				return false;
+			}
+			if (g_shutdown_cancel_requested.load(std::memory_order_acquire)) {
+				g_start_queued.store(false, std::memory_order_release);
+				set_phase("Cancelling...");
+				set_step("start rejected during shutdown");
 				return false;
 			}
 
@@ -4753,20 +4769,77 @@ namespace test_all_features {
 
 		void run_interactive_cancel_cleanup_worker() {
 			struct inflight_reset_t {
-				~inflight_reset_t() {
+				~inflight_reset_t() noexcept {
 					g_interactive_cancel_cleanup_inflight.store(false, std::memory_order_release);
 				}
 			} inflight_reset;
+			HANDLE hf = open_log_file();
+			const ULONGLONG entered_at = GetTickCount64();
+			const std::uint64_t run_id = g_run_id.load(std::memory_order_acquire);
 
 			try {
-				const ULONGLONG t0 = GetTickCount64();
-				aida::burp::camoufox::force_cleanup("testlab.cancel.interactive.async");
-				diag::log_tagged_fmt("test_all", "interactive cancel cleanup completed elapsed_ms=%llu",
-					static_cast<unsigned long long>(GetTickCount64() - t0));
+				const ULONGLONG deadline = entered_at + 15000;
+				auto before = aida::burp::camoufox::get_status();
+				log_msg(hf, "cancel", "cleanup worker entry run_id=%llu tid=%lu inflight=1 deadline_ms=%llu state=%s child_pid=%u child_alive=%d browser_open=%d cleanup_pending=%d child_processes=%u browser_processes=%u",
+					static_cast<unsigned long long>(run_id),
+					static_cast<unsigned long>(GetCurrentThreadId()),
+					static_cast<unsigned long long>(deadline),
+					camoufox_bridge_state_name(before.state),
+					before.child_pid,
+					before.child_alive ? 1 : 0,
+					before.browser_open ? 1 : 0,
+					before.cleanup_pending ? 1 : 0,
+					before.child_process_count,
+					before.browser_process_count);
+				const bool cleanup_result = aida::burp::camoufox::force_cleanup("testlab.cancel.interactive.async");
+				const ULONGLONG after_cleanup = GetTickCount64();
+				const DWORD wait_ms = after_cleanup < deadline ? static_cast<DWORD>(deadline - after_cleanup) : 0u;
+				const bool idle = aida::burp::camoufox::wait_until_idle(wait_ms, "testlab.cancel.interactive.async");
+				auto after = aida::burp::camoufox::get_status();
+				const ULONGLONG finished_at = GetTickCount64();
+				const bool residual_processes = after.child_alive || after.browser_process_count != 0 || after.child_process_count != 0;
+				const bool residual_worker = after.cleanup_pending;
+				log_msg(hf, "cancel", "cleanup receipt run_id=%llu result=%d idle=%d deadline_reached=%d elapsed_ms=%llu wait_ms=%u state=%s child_pid=%u child_alive=%d browser_open=%d page_verified=%d privacy_verified=%d cleanup_pending=%d child_processes=%u browser_processes=%u residual_processes=%d residual_worker=%d last_error_len=%zu",
+					static_cast<unsigned long long>(run_id),
+					cleanup_result ? 1 : 0,
+					idle ? 1 : 0,
+					finished_at >= deadline ? 1 : 0,
+					static_cast<unsigned long long>(finished_at >= entered_at ? finished_at - entered_at : 0),
+					wait_ms,
+					camoufox_bridge_state_name(after.state),
+					after.child_pid,
+					after.child_alive ? 1 : 0,
+					after.browser_open ? 1 : 0,
+					after.page_verified ? 1 : 0,
+					after.privacy_verified ? 1 : 0,
+					after.cleanup_pending ? 1 : 0,
+					after.child_process_count,
+					after.browser_process_count,
+					residual_processes ? 1 : 0,
+					residual_worker ? 1 : 0,
+					after.last_error.size());
 			} catch (const std::exception& ex) {
-				diag::log_tagged_fmt("test_all", "interactive cancel cleanup exception: %s", ex.what());
+				log_msg(hf, "cancel", "cleanup receipt run_id=%llu result=exception elapsed_ms=%llu message_len=%zu residual_processes=unknown residual_worker=unknown",
+					static_cast<unsigned long long>(run_id),
+					static_cast<unsigned long long>(GetTickCount64() - entered_at),
+					std::strlen(ex.what()));
 			} catch (...) {
-				diag::log_tagged("test_all", "interactive cancel cleanup exception: unknown");
+				log_msg(hf, "cancel", "cleanup receipt run_id=%llu result=unknown_exception elapsed_ms=%llu residual_processes=unknown residual_worker=unknown",
+					static_cast<unsigned long long>(run_id),
+					static_cast<unsigned long long>(GetTickCount64() - entered_at));
+			}
+			const ULONGLONG exited_at = GetTickCount64();
+			log_msg(hf, "cancel", "cleanup worker exit run_id=%llu tid=%lu elapsed_ms=%llu running=%d cancel=%d target_pid=%u",
+				static_cast<unsigned long long>(run_id),
+				static_cast<unsigned long>(GetCurrentThreadId()),
+				static_cast<unsigned long long>(exited_at >= entered_at ? exited_at - entered_at : 0),
+				g_running.load(std::memory_order_acquire) ? 1 : 0,
+				g_cancel_requested.load(std::memory_order_acquire) ? 1 : 0,
+				g_target_pid.load(std::memory_order_acquire));
+			log_debug_snapshot(hf, "cancel", "cleanup worker exit snapshot");
+			if (hf != INVALID_HANDLE_VALUE) {
+				flush_full_test_log(hf);
+				CloseHandle(hf);
 			}
 		}
 
@@ -4778,8 +4851,18 @@ namespace test_all_features {
 
 		interactive_cancel_cleanup_post_t post_interactive_cancel_cleanup() {
 			bool expected = false;
-			if (!g_interactive_cancel_cleanup_inflight.compare_exchange_strong(expected, true, std::memory_order_acq_rel))
+			if (!g_interactive_cancel_cleanup_inflight.compare_exchange_strong(expected, true, std::memory_order_acq_rel)) {
+				HANDLE hf = open_log_file();
+				log_msg(hf, "cancel", "cleanup post suppressed reason=already_inflight run_id=%llu inflight=1 running=%d cancel=%d",
+					static_cast<unsigned long long>(g_run_id.load(std::memory_order_acquire)),
+					g_running.load(std::memory_order_acquire) ? 1 : 0,
+					g_cancel_requested.load(std::memory_order_acquire) ? 1 : 0);
+				if (hf != INVALID_HANDLE_VALUE) {
+					flush_full_test_log(hf);
+					CloseHandle(hf);
+				}
 				return interactive_cancel_cleanup_post_t::already_inflight;
+			}
 
 			bool posted = false;
 			try {
@@ -4794,6 +4877,9 @@ namespace test_all_features {
 				submission.priority = 1;
 				submission.failure_policy = "reject_not_started";
 				submission.shutdown_policy = "drain";
+				submission.cancel_hook = []() {
+					g_interactive_cancel_cleanup_inflight.store(false, std::memory_order_release);
+				};
 				submission.body = std::move(task);
 				posted = aida::infra::executor::submit(std::move(submission)).submitted;
 			} catch (...) {
@@ -4802,13 +4888,36 @@ namespace test_all_features {
 
 			if (!posted) {
 				g_interactive_cancel_cleanup_inflight.store(false, std::memory_order_release);
+				HANDLE hf = open_log_file();
+				log_msg(hf, "cancel", "cleanup post rejected run_id=%llu inflight_after=0 running=%d cancel=%d",
+					static_cast<unsigned long long>(g_run_id.load(std::memory_order_acquire)),
+					g_running.load(std::memory_order_acquire) ? 1 : 0,
+					g_cancel_requested.load(std::memory_order_acquire) ? 1 : 0);
+				if (hf != INVALID_HANDLE_VALUE) {
+					flush_full_test_log(hf);
+					CloseHandle(hf);
+				}
 				return interactive_cancel_cleanup_post_t::rejected;
+			}
+			HANDLE hf = open_log_file();
+			log_msg(hf, "cancel", "cleanup post accepted run_id=%llu inflight=1 running=%d cancel=%d",
+				static_cast<unsigned long long>(g_run_id.load(std::memory_order_acquire)),
+				g_running.load(std::memory_order_acquire) ? 1 : 0,
+				g_cancel_requested.load(std::memory_order_acquire) ? 1 : 0);
+			if (hf != INVALID_HANDLE_VALUE) {
+				flush_full_test_log(hf);
+				CloseHandle(hf);
 			}
 			return interactive_cancel_cleanup_post_t::posted;
 		}
 
 		void request_interactive_cancel() {
-			g_cancel_requested.store(true, std::memory_order_release);
+			const bool was_requested = g_cancel_requested.exchange(true, std::memory_order_acq_rel);
+			diag::log_tagged_fmt("test_all", "cancel request source=interactive previous=%d current=1 run_id=%llu running=%d start_queued=%d",
+				was_requested ? 1 : 0,
+				static_cast<unsigned long long>(g_run_id.load(std::memory_order_acquire)),
+				g_running.load(std::memory_order_acquire) ? 1 : 0,
+				g_start_queued.load(std::memory_order_acquire) ? 1 : 0);
 			set_phase("Cancelling...");
 			const interactive_cancel_cleanup_post_t post_state = post_interactive_cancel_cleanup();
 			if (post_state == interactive_cancel_cleanup_post_t::posted)
@@ -4817,21 +4926,6 @@ namespace test_all_features {
 				set_step("cancel cleanup already queued");
 			else
 				set_step("cancel cleanup queue unavailable");
-		}
-
-		void cancel_tests_blocking_shutdown_impl() {
-			g_cancel_requested.store(true, std::memory_order_release);
-			diag::log_tagged_fmt("test_all", "user cancelled Test All Features");
-			try {
-				const ULONGLONG t0 = GetTickCount64();
-				aida::burp::camoufox::force_cleanup("testlab.cancel.inline");
-				diag::log_tagged_fmt("test_all", "cancel cleanup completed elapsed_ms=%llu",
-					static_cast<unsigned long long>(GetTickCount64() - t0));
-			} catch (const std::exception& ex) {
-				diag::log_tagged_fmt("test_all", "cancel cleanup exception: %s", ex.what());
-			} catch (...) {
-				diag::log_tagged("test_all", "cancel cleanup exception: unknown");
-			}
 		}
 
 	}
@@ -4938,7 +5032,14 @@ namespace test_all_features {
 	}
 
 	void cancel_tests() {
-		cancel_tests_blocking_shutdown_impl();
+		request_interactive_cancel();
+	}
+
+	void cancel_tests_for_shutdown() {
+		g_shutdown_cancel_requested.store(true, std::memory_order_release);
+		g_cancel_requested.store(true, std::memory_order_release);
+		g_start_queued.store(false, std::memory_order_release);
+		set_phase("Cancelling...");
 	}
 
 	bool is_running() {

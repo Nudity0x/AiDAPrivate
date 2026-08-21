@@ -57,6 +57,7 @@ constexpr uint64_t kPostNavigationStabilityMs = 3000;
 constexpr uint64_t kPostNavigationStabilityPollMs = 250;
 constexpr uint64_t kCleanupDrainWaitMs = 15000;
 constexpr uint64_t kCleanupDrainPollMs = 50;
+constexpr uint64_t kForceCleanupLockWaitMs = 750;
 
 std::string ascii_lower_copy(std::string text);
 
@@ -132,6 +133,24 @@ inline singleton_t& sg()
     static singleton_t s;
     return s;
 }
+
+std::timed_mutex& force_cleanup_mtx()
+{
+    static std::timed_mutex m;
+    return m;
+}
+
+struct force_cleanup_guard_t
+{
+    std::unique_lock<std::timed_mutex> lock;
+    bool acquired = false;
+
+    force_cleanup_guard_t()
+        : lock(force_cleanup_mtx(), std::defer_lock)
+    {
+        acquired = lock.try_lock_for(std::chrono::milliseconds(kForceCleanupLockWaitMs));
+    }
+};
 
 struct managed_session_t
 {
@@ -9687,7 +9706,7 @@ bool stop_bridge(const char* reason)
     return true;
 }
 
-bool force_cleanup(const char* reason)
+bool force_cleanup_default_impl(const char* reason)
 {
     const uint64_t t0 = now_ms();
     const char* cleanup_reason = safe_reason(reason);
@@ -9796,6 +9815,29 @@ bool force_cleanup(const char* reason)
         success ? 1 : 0, static_cast<unsigned long>(child_pid), reap.descendants_before, reap.alive_after,
         profile_dir.empty() ? "<empty>" : profile_dir.c_str(), static_cast<unsigned long long>(now_ms() - t0));
     return success;
+}
+
+bool force_cleanup(const char* reason)
+{
+    const uint64_t t0 = now_ms();
+    const char* cleanup_reason = safe_reason(reason);
+    force_cleanup_guard_t cleanup_guard;
+    if (!cleanup_guard.acquired)
+    {
+        diag::log_tagged_critical_fmt("camoufox", "force_cleanup_already_in_progress reason=%s wait_ms=%llu elapsed_ms=%llu caller_pid=%lu caller_tid=%lu",
+            cleanup_reason,
+            static_cast<unsigned long long>(kForceCleanupLockWaitMs),
+            static_cast<unsigned long long>(now_ms() - t0),
+            static_cast<unsigned long>(GetCurrentProcessId()),
+            static_cast<unsigned long>(GetCurrentThreadId()));
+        return false;
+    }
+    diag::log_tagged_critical_fmt("camoufox", "force_cleanup_guard_acquired reason=%s wait_elapsed_ms=%llu caller_pid=%lu caller_tid=%lu",
+        cleanup_reason,
+        static_cast<unsigned long long>(now_ms() - t0),
+        static_cast<unsigned long>(GetCurrentProcessId()),
+        static_cast<unsigned long>(GetCurrentThreadId()));
+    return force_cleanup_default_impl(reason);
 }
 
 static nlohmann::json stale_cleanup_proof_json(const stale_sidecar_cleanup_proof_t& proof)
@@ -12428,8 +12470,28 @@ bool stop_bridge(const std::string& session_id, const char* reason)
 
 bool force_cleanup(const std::string& session_id, const char* reason)
 {
+    const uint64_t t0 = now_ms();
+    const char* cleanup_reason = safe_reason(reason);
+    force_cleanup_guard_t cleanup_guard;
+    if (!cleanup_guard.acquired)
+    {
+        diag::log_tagged_critical_fmt("camoufox", "force_cleanup_already_in_progress reason=%s session_id=%s wait_ms=%llu elapsed_ms=%llu caller_pid=%lu caller_tid=%lu",
+            cleanup_reason,
+            session_id.empty() ? "default" : session_id.c_str(),
+            static_cast<unsigned long long>(kForceCleanupLockWaitMs),
+            static_cast<unsigned long long>(now_ms() - t0),
+            static_cast<unsigned long>(GetCurrentProcessId()),
+            static_cast<unsigned long>(GetCurrentThreadId()));
+        return false;
+    }
+    diag::log_tagged_critical_fmt("camoufox", "force_cleanup_guard_acquired session_id=%s reason=%s wait_elapsed_ms=%llu caller_pid=%lu caller_tid=%lu",
+        session_id.empty() ? "default" : session_id.c_str(),
+        cleanup_reason,
+        static_cast<unsigned long long>(now_ms() - t0),
+        static_cast<unsigned long>(GetCurrentProcessId()),
+        static_cast<unsigned long>(GetCurrentThreadId()));
     if (is_default_session_id(session_id))
-        return force_cleanup(reason);
+        return force_cleanup_default_impl(reason);
     return stop_managed_bridge(session_id, reason ? reason : "force_cleanup");
 }
 

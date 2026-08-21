@@ -1375,8 +1375,10 @@ namespace {
 		}
 
 		try {
-			test_all_features::cancel_tests();
-			aida::burp::camoufox::force_cleanup(cleanup_reason ? cleanup_reason : "chrome.shutdown");
+			test_all_features::cancel_tests_for_shutdown();
+			diag::log_tagged_fmt("chrome",
+				"shutdown_testlab_cancel_requested source=%s cleanup_owner=testlab",
+				source ? source : "<null>");
 		} catch (...) {
 			diag::log_tagged_critical_fmt("chrome",
 				"shutdown_camoufox_cleanup_exception source=%s",
