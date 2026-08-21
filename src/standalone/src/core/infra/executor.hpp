@@ -602,7 +602,7 @@ inline void check_deadlines() {
     }
 }
 
-inline bool shutdown() {
+inline bool shutdown(std::uint32_t timeout_ms = 15000) {
     const bool first_request = !g_shutdown_requested.exchange(true, std::memory_order_acq_rel);
     auto snap = active_snapshot();
     if (first_request) diag::log_tagged_fmt("executor",
@@ -643,7 +643,7 @@ inline bool shutdown() {
             static_cast<unsigned long long>(job.deadline_ms),
             static_cast<unsigned long long>(job.active_ms));
     }
-    const bool complete = aida::infra::taskflow_runtime::shutdown();
+    const bool complete = aida::infra::taskflow_runtime::shutdown(timeout_ms);
     diag::log_tagged_fmt("executor",
         complete ? "EXECUTOR-SHUTDOWN-COMPLETE tid=%lu"
             : "EXECUTOR-SHUTDOWN-DEFERRED tid=%lu",

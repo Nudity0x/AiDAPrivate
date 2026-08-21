@@ -267,6 +267,39 @@ constexpr DWORD kBridgeChildErrorMode = SEM_FAILCRITICALERRORS | SEM_NOGPFAULTER
 thread_local uint32_t g_bridge_activity_depth = 0;
 thread_local uint32_t g_camoufox_op_admission_depth = 0;
 
+using get_thread_error_mode_fn = DWORD(WINAPI*)();
+using set_thread_error_mode_fn = BOOL(WINAPI*)(DWORD, LPDWORD);
+
+struct thread_error_mode_api_t
+{
+    get_thread_error_mode_fn get = nullptr;
+    set_thread_error_mode_fn set = nullptr;
+};
+
+const thread_error_mode_api_t& thread_error_mode_api()
+{
+    static const thread_error_mode_api_t api = [] {
+        thread_error_mode_api_t result;
+        const HMODULE kernel32 = GetModuleHandleW(L"kernel32.dll");
+        if (!kernel32) return result;
+        result.get = reinterpret_cast<get_thread_error_mode_fn>(GetProcAddress(kernel32, "GetThreadErrorMode"));
+        result.set = reinterpret_cast<set_thread_error_mode_fn>(GetProcAddress(kernel32, "SetThreadErrorMode"));
+        if (!result.get || !result.set)
+        {
+            result.get = nullptr;
+            result.set = nullptr;
+        }
+        return result;
+    }();
+    return api;
+}
+
+DWORD current_error_mode()
+{
+    const auto& api = thread_error_mode_api();
+    return api.get ? api.get() : GetErrorMode();
+}
+
 const char* safe_reason(const char* reason)
 {
     return (reason && reason[0]) ? reason : "unspecified";
@@ -511,11 +544,20 @@ public:
     scoped_child_error_mode_t(const char* phase, DWORD create_flags, const char* command)
         : phase_(safe_reason(phase)),
           command_(command ? command : "<null>"),
-          previous_(GetErrorMode()),
+          previous_(current_error_mode()),
           desired_(previous_ | kBridgeChildErrorMode)
     {
-        const DWORD returned_previous = SetErrorMode(desired_);
-        applied_ = GetErrorMode();
+        const auto& api = thread_error_mode_api();
+        DWORD returned_previous = previous_;
+        if (api.set)
+        {
+            api.set(desired_, &returned_previous);
+        }
+        else
+        {
+            returned_previous = SetErrorMode(desired_);
+        }
+        applied_ = current_error_mode();
         diag::log_tagged_fmt("camoufox", "child_error_mode_set phase=%s create_flags=0x%08lX inherited_error_mode=%d default_error_mode_flag=%d previous=0x%08lX returned_previous=0x%08lX desired=0x%08lX applied=0x%08lX command=%s",
             phase_.c_str(),
             static_cast<unsigned long>(create_flags),
@@ -533,9 +575,18 @@ public:
 
     ~scoped_child_error_mode_t()
     {
-        const DWORD before_restore = GetErrorMode();
-        const DWORD returned_previous = SetErrorMode(previous_);
-        const DWORD after_restore = GetErrorMode();
+        const DWORD before_restore = current_error_mode();
+        const auto& api = thread_error_mode_api();
+        DWORD returned_previous = before_restore;
+        if (api.set)
+        {
+            api.set(previous_, &returned_previous);
+        }
+        else
+        {
+            returned_previous = SetErrorMode(previous_);
+        }
+        const DWORD after_restore = current_error_mode();
         diag::log_tagged_fmt("camoufox", "child_error_mode_restore phase=%s previous=0x%08lX applied=0x%08lX before_restore=0x%08lX returned_previous=0x%08lX after_restore=0x%08lX command=%s",
             phase_.c_str(),
             static_cast<unsigned long>(previous_),
@@ -1676,8 +1727,8 @@ bool spawn_capture_impl(const std::wstring& application_path, std::wstring cmdli
         attr_ready ? 1 : 0,
         static_cast<unsigned long>(create_flags),
         (create_flags & CREATE_DEFAULT_ERROR_MODE) == 0 ? 1 : 0,
-        static_cast<unsigned long>(GetErrorMode()),
-        static_cast<unsigned long>(GetErrorMode() | kBridgeChildErrorMode),
+        static_cast<unsigned long>(current_error_mode()),
+        static_cast<unsigned long>(current_error_mode() | kBridgeChildErrorMode),
         static_cast<unsigned long long>(create_t0 - t0));
     BOOL ok = FALSE;
     DWORD create_gle = ERROR_SUCCESS;
@@ -1719,8 +1770,8 @@ bool spawn_capture_impl(const std::wstring& application_path, std::wstring cmdli
                 spawn_label,
                 static_cast<unsigned long>(fallback_create_flags),
                 (fallback_create_flags & CREATE_DEFAULT_ERROR_MODE) == 0 ? 1 : 0,
-                static_cast<unsigned long>(GetErrorMode()),
-                static_cast<unsigned long>(GetErrorMode() | kBridgeChildErrorMode),
+                static_cast<unsigned long>(current_error_mode()),
+                static_cast<unsigned long>(current_error_mode() | kBridgeChildErrorMode),
                 cmdline.size());
             SetLastError(0);
             ok = CreateProcessW(
@@ -3547,7 +3598,7 @@ bool query_python_version(const std::string& python_path, int& major, int& minor
         python_path.c_str(), static_cast<unsigned long>(kDependencyProbeTimeoutMs));
     DWORD code = 0;
     std::string captured;
-    if (!spawn_python_capture(python_path, L"-I -S -c \"import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')\"", kDependencyProbeTimeoutMs, code, captured, "python_version_probe"))
+    if (!spawn_python_capture(python_path, L"-I -S -c \"import sys; assert sys.implementation.name == 'cpython'; print(f'{sys.version_info.major}.{sys.version_info.minor}')\"", kDependencyProbeTimeoutMs, code, captured, "python_version_probe"))
     {
         detail = "version probe timed out or failed to spawn";
         diag::log_tagged_fmt("camoufox", "python_version_probe spawn_failed path=%s elapsed_ms=%llu detail=%s",
@@ -3594,7 +3645,7 @@ bool supported_camoufox_python(const std::string& python_path, std::string* reas
         if (reason) *reason = detail;
         return false;
     }
-    if (major == 3 && minor >= 10 && minor <= 13)
+    if (major == 3 && minor == 12)
     {
         if (reason) *reason = "python " + detail;
         return true;
@@ -7576,7 +7627,7 @@ bool ensure_python_available(std::string& out_python_path)
     {
         std::lock_guard<std::recursive_mutex> lk(sg().mtx);
         set_error_locked(allow_system_python
-            ? "supported Python 3.10-3.13 interpreter not found for Camoufox"
+        ? "supported CPython 3.12 interpreter not found for Camoufox"
             : std::string("Camoufox app-local Python runtime missing\n") + install::setup_instructions());
     }
     return false;
@@ -8300,8 +8351,8 @@ bool start_bridge(const launch_config_t& cfg)
         static_cast<int>(browser_attr != INVALID_FILE_ATTRIBUTES && (browser_attr & FILE_ATTRIBUTE_DIRECTORY) == 0),
         static_cast<unsigned long>(mcp_create_flags),
         (mcp_create_flags & CREATE_DEFAULT_ERROR_MODE) == 0 ? 1 : 0,
-        static_cast<unsigned long>(GetErrorMode()),
-        static_cast<unsigned long>(GetErrorMode() | kBridgeChildErrorMode));
+        static_cast<unsigned long>(current_error_mode()),
+        static_cast<unsigned long>(current_error_mode() | kBridgeChildErrorMode));
     sb_resolve_ms = now_ms() - sb_resolve_start_ms;
     const uint64_t sb_spawn_start_ms = now_ms();
     bool connect_ok = false;
@@ -11439,8 +11490,8 @@ bool start_managed_bridge(const launch_config_t& cfg, const std::string& session
         static_cast<int>(scfg.env.find("AIDA_CAMOUFOX_PROFILE_ROOT") != scfg.env.end()),
         static_cast<unsigned long>(mcp_create_flags),
         (mcp_create_flags & CREATE_DEFAULT_ERROR_MODE) == 0 ? 1 : 0,
-        static_cast<unsigned long>(GetErrorMode()),
-        static_cast<unsigned long>(GetErrorMode() | kBridgeChildErrorMode));
+        static_cast<unsigned long>(current_error_mode()),
+        static_cast<unsigned long>(current_error_mode() | kBridgeChildErrorMode));
     bool managed_connect_ok = false;
     const uint64_t connect_start_ms = now_ms();
     {
