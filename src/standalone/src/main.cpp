@@ -8452,6 +8452,8 @@ int main(int, char**)
         aida::diagnostics::metadata_ring::breadcrumb_category_t::startup_shutdown,
         "standalone_shutdown_begin", "cleanup_starting", true);
     aida::diagnostics::metadata_ring::request_shutdown();
+    const bool shutdown_admitted = claim_chrome_shutdown_admission("main.shutdown_sequence");
+    diag::log_tagged_critical_fmt("main", "shutdown_admission_done admitted=%d", shutdown_admitted ? 1 : 0);
     const bool observer_stopped = aida::diagnostics::observer::stop();
     diag::log_tagged_critical_fmt("main", "shutdown_observer_done joined=%d", observer_stopped ? 1 : 0);
     diag::log_tagged_critical_fmt("main",
@@ -8472,13 +8474,26 @@ int main(int, char**)
     diag::log_tagged_critical("main", "shutdown_testlab_cancel_done");
     aida_shutdown_diag::mark("shutdown_camoufox_force_cleanup");
     try {
-        bool cleanup_complete = false;
-        for (unsigned attempt = 0; attempt < 20 && !cleanup_complete; ++attempt) {
-            cleanup_complete = aida::burp::camoufox::force_cleanup("main.shutdown_sequence");
-            if (!cleanup_complete)
-                ::Sleep(100);
-        }
-        diag::log_tagged_critical_fmt("main", "shutdown_camoufox_force_cleanup_done complete=%d", cleanup_complete ? 1 : 0);
+        const auto cleanup_before = aida::burp::camoufox::get_status();
+        const std::uint64_t cleanup_generation_before = cleanup_before.cleanup_generation;
+        const bool cleanup_requested = aida::burp::camoufox::force_cleanup("main.shutdown_sequence");
+        const auto cleanup_request = aida::burp::camoufox::get_status();
+        const std::uint64_t cleanup_generation = cleanup_request.cleanup_generation;
+        const bool cleanup_receipt = aida::burp::camoufox::wait_until_idle(20000, "main.shutdown_sequence.receipt");
+        const auto cleanup_after = aida::burp::camoufox::get_status();
+        const bool generation_drained = !cleanup_after.cleanup_pending &&
+            (cleanup_generation == 0 || cleanup_after.cleanup_generation == cleanup_generation) &&
+            !cleanup_after.child_alive && cleanup_after.child_process_count == 0;
+        const bool cleanup_complete = cleanup_requested && cleanup_receipt && generation_drained;
+        diag::log_tagged_critical_fmt("main", "shutdown_camoufox_force_cleanup_done complete=%d request=%d receipt=%d generation_before=%llu generation_after=%llu cleanup_pending=%d child_pid=%u child_alive=%d",
+            cleanup_complete ? 1 : 0,
+            cleanup_requested ? 1 : 0,
+            cleanup_receipt ? 1 : 0,
+            static_cast<unsigned long long>(cleanup_generation_before),
+            static_cast<unsigned long long>(cleanup_generation),
+            cleanup_after.cleanup_pending ? 1 : 0,
+            static_cast<unsigned>(cleanup_after.child_pid),
+            cleanup_after.child_alive ? 1 : 0);
     } catch (...) {
         aida::diagnostics::crash::emit_crash_breadcrumb(0xE06D7363u, nullptr, "shutdown_camoufox_force_cleanup");
         diag::log_tagged_critical("main", "shutdown_camoufox_force_cleanup_exception");

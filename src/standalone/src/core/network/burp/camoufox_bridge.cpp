@@ -57,7 +57,7 @@ constexpr uint64_t kPostNavigationStabilityMs = 3000;
 constexpr uint64_t kPostNavigationStabilityPollMs = 250;
 constexpr uint64_t kCleanupDrainWaitMs = 15000;
 constexpr uint64_t kCleanupDrainPollMs = 50;
-constexpr uint64_t kForceCleanupLockWaitMs = 750;
+constexpr uint64_t kLifecycleLockWaitMs = 750;
 
 std::string ascii_lower_copy(std::string text);
 
@@ -134,21 +134,21 @@ inline singleton_t& sg()
     return s;
 }
 
-std::timed_mutex& force_cleanup_mtx()
+std::recursive_timed_mutex& lifecycle_mtx()
 {
-    static std::timed_mutex m;
+    static std::recursive_timed_mutex m;
     return m;
 }
 
-struct force_cleanup_guard_t
+struct lifecycle_guard_t
 {
-    std::unique_lock<std::timed_mutex> lock;
+    std::unique_lock<std::recursive_timed_mutex> lock;
     bool acquired = false;
 
-    force_cleanup_guard_t()
-        : lock(force_cleanup_mtx(), std::defer_lock)
+    lifecycle_guard_t()
+        : lock(lifecycle_mtx(), std::defer_lock)
     {
-        acquired = lock.try_lock_for(std::chrono::milliseconds(kForceCleanupLockWaitMs));
+        acquired = lock.try_lock_for(std::chrono::milliseconds(kLifecycleLockWaitMs));
     }
 };
 
@@ -191,6 +191,8 @@ struct managed_session_t
     uint64_t                              cleanup_generation = 0;
     uint64_t                              cleanup_started_ms = 0;
     uint32_t                              cleanup_child_pid = 0;
+    std::string                           cleanup_profile_dir;
+    bool                                  cleanup_profile_generated = false;
     std::string                           cleanup_reason;
     nlohmann::json                        cleanup_diagnostics = nlohmann::json::object();
     uint64_t                              last_launch_ms = 0;
@@ -1551,6 +1553,7 @@ bool remove_directory_tree_w(const std::wstring& dir, uint32_t& files_removed, u
 
 void purge_generated_profile_dir(const std::string& profile_dir, const std::string& reason)
 {
+    std::unique_lock<std::recursive_timed_mutex> lifecycle(lifecycle_mtx());
     if (profile_dir.empty())
         return;
     const std::wstring profile_w = utf8_to_wide(profile_dir);
@@ -1850,6 +1853,7 @@ bool spawn_capture_impl(const std::wstring& application_path, std::wstring cmdli
         elapsed += step;
         if (timeout_ms != INFINITE && elapsed >= timeout_ms)
         {
+            std::unique_lock<std::recursive_timed_mutex> lifecycle(lifecycle_mtx());
             TerminateProcess(pi.hProcess, 1);
             std::string tail = compact_child_output_tail(out_stdout, 600);
             out_stdout += " spawn timeout elapsed_ms=" + std::to_string(elapsed) + " output_tail=" + tail;
@@ -3793,6 +3797,7 @@ void terminate_process_id_sync(uint32_t pid, const std::string& reason, uint32_t
 process_tree_reap_result_t terminate_process_tree_sync(uint32_t root_pid, const std::string& reason)
 {
     process_tree_reap_result_t result;
+    std::unique_lock<std::recursive_timed_mutex> lifecycle(lifecycle_mtx());
     if (root_pid == 0)
         return result;
     const uint64_t t0 = now_ms();
@@ -3939,7 +3944,7 @@ void mark_cleanup_started_locked(uint64_t generation, uint32_t child_pid = 0, co
         static_cast<unsigned long long>(sg().generation), static_cast<int>(sg().cleanup_pending));
 }
 
-void mark_cleanup_finished(uint64_t generation, uint64_t elapsed_ms, const std::string& reason)
+void mark_cleanup_finished(uint64_t generation, uint64_t elapsed_ms, const std::string& reason, bool reap_complete = true)
 {
     std::string cleanup_profile_dir;
     bool should_purge_profile = false;
@@ -3952,7 +3957,7 @@ void mark_cleanup_finished(uint64_t generation, uint64_t elapsed_ms, const std::
     nlohmann::json cleanup_diag = sg().cleanup_diagnostics.is_object()
         ? sg().cleanup_diagnostics
         : nlohmann::json::object();
-    if (sg().cleanup_generation == generation)
+    if (sg().cleanup_generation == generation && reap_complete)
     {
         sg().cleanup_pending = false;
         sg().last_cleanup_ms = elapsed_ms;
@@ -3994,7 +3999,7 @@ void mark_cleanup_finished(uint64_t generation, uint64_t elapsed_ms, const std::
         static_cast<unsigned long long>(age_ms), cleanup_reason.c_str(), reason.c_str(),
         static_cast<unsigned long long>(elapsed_ms));
     lk.unlock();
-    if (should_purge_profile)
+    if (should_purge_profile && reap_complete)
         purge_generated_profile_dir(cleanup_profile_dir, reason);
 }
 
@@ -4022,6 +4027,7 @@ void cleanup_poisoned_client_async(uint32_t child_pid, const std::string& reason
         return;
     }
     auto cleanup_task = [child_pid, reason, generation]() {
+        std::unique_lock<std::recursive_timed_mutex> lifecycle(lifecycle_mtx());
         const uint64_t t0 = now_ms();
         const std::string profile_dir = cleanup_profile_dir_snapshot(generation);
         diag::log_tagged_critical_fmt("camoufox", "cleanup_poisoned start generation=%llu reason=%s child_pid=%lu profile_dir=%s",
@@ -4033,7 +4039,7 @@ void cleanup_poisoned_client_async(uint32_t child_pid, const std::string& reason
             reap.descendants_before, reap.alive_after, reap.alive_after == 0 ? 1 : 0,
             static_cast<unsigned long long>(reap.elapsed_ms));
         record_cleanup_reap_result(generation, "cleanup_poisoned", reason, child_pid, reap, now_ms() - t0, std::string());
-        mark_cleanup_finished(generation, now_ms() - t0, reason);
+        mark_cleanup_finished(generation, now_ms() - t0, reason, reap.alive_after == 0);
     };
     if (!post_bridge_task("camoufox.cleanup_poisoned", cleanup_task)) {
         diag::log_tagged_fmt("camoufox", "cleanup_poisoned_post_failed generation=%llu reason=%s",
@@ -4050,6 +4056,7 @@ void cleanup_client_async(std::shared_ptr<mcp_client::client_t> cli, uint32_t ch
         return;
     }
     auto cleanup_task = [cli, child_pid, reason, generation]() {
+        std::unique_lock<std::recursive_timed_mutex> lifecycle(lifecycle_mtx());
         const uint64_t t0 = now_ms();
         const std::string profile_dir = cleanup_profile_dir_snapshot(generation);
         process_tree_reap_result_t reap;
@@ -4063,7 +4070,7 @@ void cleanup_client_async(std::shared_ptr<mcp_client::client_t> cli, uint32_t ch
             reap.descendants_before, reap.alive_after, child_pid == 0 || reap.alive_after == 0 ? 1 : 0,
             static_cast<unsigned long long>(reap.elapsed_ms));
         record_cleanup_reap_result(generation, "cleanup_async", reason, child_pid, reap, now_ms() - t0, cli ? cli->last_error() : std::string());
-        mark_cleanup_finished(generation, now_ms() - t0, reason);
+        mark_cleanup_finished(generation, now_ms() - t0, reason, reap.alive_after == 0);
         if (cli)
         {
             disconnect_client_sync(cli, reason);
@@ -4360,7 +4367,7 @@ process_tree_reap_result_t cleanup_client_reap_now_detach_disconnect(std::shared
         reap.descendants_before, reap.alive_after, child_pid == 0 || reap.alive_after == 0 ? 1 : 0,
         static_cast<unsigned long long>(reap.elapsed_ms));
     record_cleanup_reap_result(generation, "cleanup_sync_reap", reason, child_pid, reap, now_ms() - t0, cli ? cli->last_error() : std::string());
-    mark_cleanup_finished(generation, now_ms() - t0, reason);
+    mark_cleanup_finished(generation, now_ms() - t0, reason, child_pid == 0 || reap.alive_after == 0);
     if (cli)
         disconnect_client_async(cli, reason + ":post_reap_disconnect");
     diag::log_tagged_fmt("camoufox", "cleanup_sync_reap_end generation=%llu reason=%s child_pid=%lu client_detached=%d elapsed_ms=%llu",
@@ -7795,7 +7802,8 @@ bool drain_pending_cleanup_before_launch_locked(std::unique_lock<std::recursive_
     {
         lk.unlock();
         record_cleanup_reap_result(forced_generation, caller && caller[0] ? caller : "start_bridge", std::string("start_bridge_pending_cleanup_drain:") + forced_reason, forced_pid, reap, now_ms() - wait_start, std::string());
-        mark_cleanup_finished(forced_generation, now_ms() - wait_start, std::string("start_bridge_pending_cleanup_drain:") + forced_reason);
+        mark_cleanup_finished(forced_generation, now_ms() - wait_start, std::string("start_bridge_pending_cleanup_drain:") + forced_reason,
+            forced_pid == 0 || reap.alive_after == 0);
         lk.lock();
     }
 
@@ -7868,6 +7876,12 @@ bool start_bridge(const launch_config_t& cfg)
 {
     if (!is_default_session_id(cfg.session_id))
         return start_bridge(cfg, cfg.session_id);
+    lifecycle_guard_t lifecycle;
+    if (!lifecycle.acquired)
+    {
+        diag::log_tagged_critical_fmt("camoufox", "start_bridge lifecycle_busy session_id=%s", cfg.session_id.empty() ? "default" : cfg.session_id.c_str());
+        return false;
+    }
     const uint64_t bridge_start_ms = now_ms();
     uint64_t sb_drain_start_ms = 0;
     uint64_t sb_drain_ms = 0;
@@ -9565,6 +9579,13 @@ void end_activity(uint64_t token, const char* owner)
 
 bool stop_bridge(const char* reason)
 {
+    lifecycle_guard_t lifecycle;
+    if (!lifecycle.acquired)
+    {
+        diag::log_tagged_critical_fmt("camoufox", "stop_bridge_lifecycle_busy reason=%s wait_ms=%llu",
+            safe_reason(reason), static_cast<unsigned long long>(kLifecycleLockWaitMs));
+        return false;
+    }
     const uint64_t stop_start_ms = now_ms();
     const uint64_t stop_epoch = sg().stop_epoch.fetch_add(1, std::memory_order_acq_rel) + 1;
     const char* stop_reason = safe_reason(reason);
@@ -9804,7 +9825,8 @@ bool force_cleanup_default_impl(const char* reason)
         disconnect_client_async(cli, std::string("force_cleanup:") + cleanup_reason + ":disconnect");
 
     if (cleanup_marked)
-        mark_cleanup_finished(generation, now_ms() - t0, std::string("force_cleanup:") + cleanup_reason);
+        mark_cleanup_finished(generation, now_ms() - t0, std::string("force_cleanup:") + cleanup_reason,
+            child_pid == 0 || reap.alive_after == 0);
     else if (child_pid != 0 && reap.alive_after == 0 && sg().tracked_child_pid.load(std::memory_order_acquire) == child_pid)
         sg().tracked_child_pid.store(0, std::memory_order_release);
 
@@ -9821,12 +9843,12 @@ bool force_cleanup(const char* reason)
 {
     const uint64_t t0 = now_ms();
     const char* cleanup_reason = safe_reason(reason);
-    force_cleanup_guard_t cleanup_guard;
+    lifecycle_guard_t cleanup_guard;
     if (!cleanup_guard.acquired)
     {
         diag::log_tagged_critical_fmt("camoufox", "force_cleanup_already_in_progress reason=%s wait_ms=%llu elapsed_ms=%llu caller_pid=%lu caller_tid=%lu",
             cleanup_reason,
-            static_cast<unsigned long long>(kForceCleanupLockWaitMs),
+            static_cast<unsigned long long>(kLifecycleLockWaitMs),
             static_cast<unsigned long long>(now_ms() - t0),
             static_cast<unsigned long>(GetCurrentProcessId()),
             static_cast<unsigned long>(GetCurrentThreadId()));
@@ -9997,6 +10019,11 @@ static void clear_managed_page_state_locked(managed_session_t& session)
 
 stale_sidecar_cleanup_result_t cleanup_stale_sidecar_if_owned(const stale_sidecar_cleanup_proof_t& proof)
 {
+    lifecycle_guard_t lifecycle;
+    if (!lifecycle.acquired)
+    {
+        return stale_cleanup_rejected(proof, "lifecycle_busy", {});
+    }
     std::vector<std::string> missing;
     stale_cleanup_add_missing_proof_fields(proof, missing);
     if (!missing.empty())
@@ -10156,7 +10183,8 @@ stale_sidecar_cleanup_result_t cleanup_stale_sidecar_if_owned(const stale_sideca
 
     if (default_session)
     {
-        mark_cleanup_finished(cleanup_generation, now_ms() - t0, std::string("mcp_stale_sidecar_cleanup:") + proof.diagnostic_id);
+        mark_cleanup_finished(cleanup_generation, now_ms() - t0, std::string("mcp_stale_sidecar_cleanup:") + proof.diagnostic_id,
+            child_pid == 0 || reap.alive_after == 0);
     }
     else
     {
@@ -11041,6 +11069,13 @@ bridge_status_t managed_status(const std::shared_ptr<managed_session_t>& session
 
 bool start_managed_bridge(const launch_config_t& cfg, const std::string& session_id)
 {
+    lifecycle_guard_t lifecycle;
+    if (!lifecycle.acquired)
+    {
+        diag::log_tagged_critical_fmt("camoufox", "managed_start_lifecycle_busy session_id=%s wait_ms=%llu",
+            normalize_session_id(session_id).c_str(), static_cast<unsigned long long>(kLifecycleLockWaitMs));
+        return false;
+    }
     const uint64_t t0 = now_ms();
     uint64_t preflight_ms = 0;
     uint64_t connect_ms = 0;
@@ -11072,6 +11107,17 @@ bool start_managed_bridge(const launch_config_t& cfg, const std::string& session
     std::string stale_reuse_cleanup_reason;
     {
         std::lock_guard<std::recursive_mutex> lk(session->mtx);
+        if (session->cleanup_pending)
+        {
+            session->last_error = "camoufox managed session cleanup still pending after incomplete process reap";
+            session->cleanup_diagnostics["status"] = "pending_reap_blocks_start";
+            diag::log_tagged_critical_fmt("camoufox", "managed_start_cleanup_pending session_id=%s generation=%llu cleanup_generation=%llu child_pid=%lu profile_dir=%s",
+                sid.c_str(), static_cast<unsigned long long>(session->generation),
+                static_cast<unsigned long long>(session->cleanup_generation),
+                static_cast<unsigned long>(session->cleanup_child_pid),
+                session->cleanup_profile_dir.empty() ? "<empty>" : session->cleanup_profile_dir.c_str());
+            return false;
+        }
         session->attempt_started_ms = t0;
         session->attempt_elapsed_ms = 0;
         const bool child_alive = process_alive(session->child_pid);
@@ -12134,6 +12180,9 @@ bool start_managed_bridge(const launch_config_t& cfg, const std::string& session
 
 bool stop_managed_bridge(const std::string& session_id, const char* reason)
 {
+    lifecycle_guard_t lifecycle;
+    if (!lifecycle.acquired)
+        return false;
     const std::string sid = normalize_session_id(session_id);
     auto session = get_managed_session(sid, false);
     if (!session) return true;
@@ -12142,8 +12191,21 @@ bool stop_managed_bridge(const std::string& session_id, const char* reason)
     std::unique_lock<std::recursive_mutex> op_lk(session->operation_mtx);
     std::shared_ptr<mcp_client::client_t> cli;
     uint32_t child_pid = 0;
+    std::string cleanup_profile_dir;
+    bool cleanup_profile_generated = false;
+    uint64_t cleanup_generation = 0;
     {
         std::lock_guard<std::recursive_mutex> lk(session->mtx);
+        if (session->cleanup_pending)
+        {
+            session->cleanup_diagnostics["status"] = "pending_reap_stop_ignored";
+            diag::log_tagged_critical_fmt("camoufox", "managed_stop_cleanup_pending session_id=%s generation=%llu cleanup_generation=%llu child_pid=%lu profile_dir=%s",
+                sid.c_str(), static_cast<unsigned long long>(session->generation),
+                static_cast<unsigned long long>(session->cleanup_generation),
+                static_cast<unsigned long>(session->cleanup_child_pid),
+                session->cleanup_profile_dir.empty() ? "<empty>" : session->cleanup_profile_dir.c_str());
+            return false;
+        }
         cli = session->client;
         child_pid = session->child_pid;
     }
@@ -12154,6 +12216,10 @@ bool stop_managed_bridge(const std::string& session_id, const char* reason)
     }
     {
         std::unique_lock<std::recursive_mutex> lk(session->mtx);
+        const uint64_t stop_generation = ++session->generation;
+        cleanup_generation = stop_generation;
+        cleanup_profile_dir = session->active_profile_dir;
+        cleanup_profile_generated = session->active_profile_generated;
         session->client.reset();
         session->child_pid = 0;
         session->state = bridge_state_t::stopped;
@@ -12165,6 +12231,19 @@ bool stop_managed_bridge(const std::string& session_id, const char* reason)
         session->active_page_url.clear();
         session->active_page_title.clear();
         session->last_error.clear();
+        session->cleanup_pending = child_pid != 0 || cli != nullptr;
+        session->cleanup_generation = stop_generation;
+        session->cleanup_started_ms = session->cleanup_pending ? now_ms() : 0;
+        session->cleanup_child_pid = child_pid;
+        session->cleanup_profile_dir = cleanup_profile_dir;
+        session->cleanup_profile_generated = cleanup_profile_generated;
+        session->cleanup_reason = std::string("managed_stop_bridge:") + stop_reason;
+        session->cleanup_diagnostics = {
+            {"status", session->cleanup_pending ? "pending" : "finished"},
+            {"generation", stop_generation},
+            {"child_pid", child_pid},
+            {"reason", session->cleanup_reason}
+        };
         session->last_cleanup_ms = 0;
         const uint64_t managed_launch_token = session->launch_admission_token;
         session->launch_admission_token = 0;
@@ -12172,11 +12251,84 @@ bool stop_managed_bridge(const std::string& session_id, const char* reason)
         release_launch_admission(managed_launch_token, stop_reason, sid);
     }
     clear_sticky_setup_failure("managed_stop_bridge");
+    process_tree_reap_result_t reap;
     if (child_pid != 0)
-        terminate_process_tree_sync(child_pid, std::string("managed_stop_") + sid + "_" + stop_reason);
+        reap = terminate_process_tree_sync(child_pid, std::string("managed_stop_") + sid + "_" + stop_reason);
+    const bool reap_complete = child_pid == 0 || reap.alive_after == 0;
     {
         std::lock_guard<std::recursive_mutex> lk(session->mtx);
         session->last_cleanup_ms = now_ms() - t0;
+        if (session->cleanup_generation == session->generation)
+        {
+            session->cleanup_pending = !reap_complete;
+            session->cleanup_started_ms = reap_complete ? 0 : session->cleanup_started_ms;
+            session->cleanup_child_pid = reap_complete ? 0 : child_pid;
+            if (reap_complete)
+            {
+                session->cleanup_profile_dir.clear();
+                session->cleanup_profile_generated = false;
+                if (session->active_profile_dir == cleanup_profile_dir)
+                {
+                    session->active_profile_dir.clear();
+                    session->active_profile_generated = false;
+                }
+            }
+            session->cleanup_diagnostics["status"] = reap_complete ? "finished" : "pending_reap";
+            session->cleanup_diagnostics["process_reap"] = cleanup_reap_json(reap);
+            session->cleanup_diagnostics["elapsed_ms"] = session->last_cleanup_ms;
+            session->cleanup_diagnostics["deferred_cleanup"] = !reap_complete;
+        }
+    }
+    if (reap_complete && cleanup_profile_generated)
+        purge_generated_profile_dir(cleanup_profile_dir, std::string("managed_stop_") + sid + "_" + stop_reason);
+    if (!reap_complete)
+    {
+        auto deferred_cleanup = [session, child_pid, cleanup_profile_dir, cleanup_profile_generated, stop_reason_text = std::string(stop_reason), cleanup_generation]() {
+            const uint64_t deferred_start_ms = now_ms();
+            process_tree_reap_result_t deferred_reap;
+            bool complete = false;
+            while (now_ms() - deferred_start_ms < kCleanupDrainWaitMs)
+            {
+                deferred_reap = terminate_process_tree_sync(child_pid, std::string("managed_stop_deferred_") + session->session_id + "_" + stop_reason_text);
+                if (deferred_reap.alive_after == 0)
+                {
+                    complete = true;
+                    break;
+                }
+                Sleep(static_cast<DWORD>(kCleanupDrainPollMs));
+            }
+            {
+                std::lock_guard<std::recursive_mutex> lk(session->mtx);
+                if (session->cleanup_generation == cleanup_generation)
+                {
+                    session->last_cleanup_ms = now_ms() - deferred_start_ms;
+                    session->cleanup_diagnostics["process_reap_deferred"] = cleanup_reap_json(deferred_reap);
+                    session->cleanup_diagnostics["deferred_elapsed_ms"] = session->last_cleanup_ms;
+                    session->cleanup_diagnostics["status"] = complete ? "finished" : "pending_reap";
+                    if (complete)
+                    {
+                        session->cleanup_pending = false;
+                        session->cleanup_started_ms = 0;
+                        session->cleanup_child_pid = 0;
+                        session->cleanup_profile_dir.clear();
+                        session->cleanup_profile_generated = false;
+                        if (session->active_profile_dir == cleanup_profile_dir)
+                        {
+                            session->active_profile_dir.clear();
+                            session->active_profile_generated = false;
+                        }
+                    }
+                }
+            }
+            if (complete && cleanup_profile_generated)
+                purge_generated_profile_dir(cleanup_profile_dir, std::string("managed_stop_deferred_") + session->session_id + "_" + stop_reason_text);
+            diag::log_tagged_fmt("camoufox", "managed_stop_deferred session_id=%s generation=%llu child_pid=%lu alive_after=%zu complete=%d elapsed_ms=%llu",
+                session->session_id.c_str(), static_cast<unsigned long long>(cleanup_generation),
+                static_cast<unsigned long>(child_pid), deferred_reap.alive_after, complete ? 1 : 0,
+                static_cast<unsigned long long>(now_ms() - deferred_start_ms));
+        };
+        if (!post_bridge_task("camoufox.managed_stop_deferred", deferred_cleanup))
+            deferred_cleanup();
     }
     diag::log_tagged_fmt("camoufox", "managed_stop session_id=%s reason=%s child_pid=%lu elapsed_ms=%llu",
         sid.c_str(), stop_reason, static_cast<unsigned long>(child_pid), static_cast<unsigned long long>(now_ms() - t0));
@@ -12472,13 +12624,13 @@ bool force_cleanup(const std::string& session_id, const char* reason)
 {
     const uint64_t t0 = now_ms();
     const char* cleanup_reason = safe_reason(reason);
-    force_cleanup_guard_t cleanup_guard;
+    lifecycle_guard_t cleanup_guard;
     if (!cleanup_guard.acquired)
     {
         diag::log_tagged_critical_fmt("camoufox", "force_cleanup_already_in_progress reason=%s session_id=%s wait_ms=%llu elapsed_ms=%llu caller_pid=%lu caller_tid=%lu",
             cleanup_reason,
             session_id.empty() ? "default" : session_id.c_str(),
-            static_cast<unsigned long long>(kForceCleanupLockWaitMs),
+            static_cast<unsigned long long>(kLifecycleLockWaitMs),
             static_cast<unsigned long long>(now_ms() - t0),
             static_cast<unsigned long>(GetCurrentProcessId()),
             static_cast<unsigned long>(GetCurrentThreadId()));
@@ -13122,6 +13274,14 @@ call_result_t select_page(const std::string& session_id, const std::string& page
 
 call_result_t close_page(const std::string& session_id, const std::string& page_id)
 {
+    lifecycle_guard_t lifecycle;
+    if (!lifecycle.acquired)
+    {
+        call_result_t result;
+        result.ok = false;
+        result.error = "camoufox lifecycle operation already active";
+        return result;
+    }
     nlohmann::json args;
     args["page_id"] = page_id;
     return call_tool("close_page", args, 15000, session_id);

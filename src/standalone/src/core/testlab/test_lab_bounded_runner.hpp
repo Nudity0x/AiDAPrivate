@@ -34,6 +34,7 @@ struct bounded_run_result_t {
 	bool cancellation_observed = false;
 	bool cleanup_complete = false;
 	bool worker_exit_pending = false;
+	bool operation_quarantined = false;
 	std::uint32_t worker_pid = 0;
 	std::uint32_t worker_tid = 0;
 	std::uint64_t elapsed_ms = 0;
@@ -77,6 +78,7 @@ struct bounded_run_state_t {
 	std::atomic<bool> cancellation_requested{false};
 	std::atomic<bool> cancellation_observed{false};
 	std::atomic<bool> cleanup_complete{false};
+	std::atomic<bool> operation_quarantined{false};
 	std::atomic<std::uint32_t> worker_pid{0};
 	std::atomic<std::uint32_t> worker_tid{0};
 	std::atomic<std::uint64_t> started_ms{0};
@@ -256,6 +258,7 @@ public:
 		if (!state->cv.wait_for(lk, std::chrono::milliseconds(timeout_ms), [&state]() { return state->done; })) {
 			state->cancellation->store(true, std::memory_order_release);
 			state->cancellation_requested.store(true, std::memory_order_release);
+			state->operation_quarantined.store(true, std::memory_order_release);
 			lk.unlock();
 			diag::log_tagged_fmt("test_lab.bounded_runner", "cancellation_requested receipt_id=%llu task_id=%llu timeout_ms=%u elapsed_ms=%llu",
 				static_cast<unsigned long long>(state->receipt_id), static_cast<unsigned long long>(task_id),
@@ -277,13 +280,15 @@ public:
 			result.cancellation_observed = state->cancellation_observed.load(std::memory_order_acquire);
 			result.cleanup_complete = cleanup_complete;
 			result.worker_exit_pending = worker_started && !worker_exited;
+			result.operation_quarantined = state->operation_quarantined.load(std::memory_order_acquire);
 			result.worker_pid = state->worker_pid.load(std::memory_order_acquire);
 			result.worker_tid = state->worker_tid.load(std::memory_order_acquire);
 			result.elapsed_ms = GetTickCount64() - run_started_ms;
 			lk.unlock();
-			diag::log_tagged_fmt("test_lab.bounded_runner", "bounded_drain receipt_id=%llu task_id=%llu cancellation_requested=1 cancellation_observed=%d cleanup_complete=%d worker_exit_pending=%d worker_started=%d worker_exited=%d worker_pid=%u worker_tid=%u elapsed_ms=%llu",
+			diag::log_tagged_fmt("test_lab.bounded_runner", "bounded_drain receipt_id=%llu task_id=%llu cancellation_requested=1 cancellation_observed=%d cleanup_complete=%d operation_quarantined=%d worker_exit_pending=%d worker_started=%d worker_exited=%d worker_pid=%u worker_tid=%u elapsed_ms=%llu",
 				static_cast<unsigned long long>(state->receipt_id), static_cast<unsigned long long>(task_id),
 				result.cancellation_observed ? 1 : 0, result.cleanup_complete ? 1 : 0,
+				result.operation_quarantined ? 1 : 0,
 				result.worker_exit_pending ? 1 : 0, result.worker_started ? 1 : 0, result.worker_exited ? 1 : 0,
 				static_cast<unsigned>(result.worker_pid), static_cast<unsigned>(result.worker_tid),
 				static_cast<unsigned long long>(result.elapsed_ms));
