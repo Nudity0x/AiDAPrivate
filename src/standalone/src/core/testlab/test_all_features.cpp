@@ -4217,7 +4217,12 @@ namespace test_all_features {
 					set_phase("MCP tool tests");
 					set_step("phase call: MCP tool tests");
 					log_phase_begin(hf, "MCP tool tests");
-					phase_mcp_tests(hf, g_passed, g_failed, g_skipped, cancelled);
+					mcp_phase_context_t mcp_context;
+					mcp_context.passed = &g_passed;
+					mcp_context.failed = &g_failed;
+					mcp_context.skipped = &g_skipped;
+					mcp_context.cancelled = cancelled;
+					phase_mcp_tests(hf, mcp_context);
 					log_phase_end(hf, "MCP tool tests");
 				}
 			}

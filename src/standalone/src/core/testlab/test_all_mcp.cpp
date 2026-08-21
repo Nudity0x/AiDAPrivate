@@ -170,7 +170,11 @@ namespace {
     std::atomic<uint64_t> g_mcp_phase_instance_counter{0};
     std::atomic<int> g_mcp_phase_enter_count{0};
     std::atomic<bool> g_mcp_phase_active{false};
-    bool (*g_mcp_cancelled_fn)() = nullptr;
+    std::function<bool()> g_mcp_cancelled_fn;
+
+    bool mcp_cancelled_bridge() {
+        return g_mcp_cancelled_fn && g_mcp_cancelled_fn();
+    }
     std::atomic<bool> g_mcp_coverage_audit_started{false};
     std::atomic<bool> g_mcp_coverage_audit_completed{false};
     constexpr int k_mcp_planned_tool_tests = 579;
@@ -35563,8 +35567,19 @@ void log_mcp_phase_remaining_diagnostics(HANDLE hf, int phase_remaining) {
     }
 }
 
-void phase_mcp_tests(HANDLE hf, std::atomic<int>& passed, std::atomic<int>& failed, std::atomic<int>& global_skipped, bool(*cancelled)()) {
-    g_mcp_cancelled_fn = cancelled;
+void phase_mcp_tests(HANDLE hf, const mcp_phase_context_t& input_context) {
+    std::string context_reason;
+    if (!input_context.validate(context_reason)) {
+        log_msg(hf, "mcp_phase", "FAIL -- invalid MCP phase context: %s", context_reason.c_str());
+        if (input_context.failed)
+            input_context.failed->fetch_add(1, std::memory_order_acq_rel);
+        return;
+    }
+    g_mcp_cancelled_fn = input_context.cancelled;
+    auto& passed = *input_context.passed;
+    auto& failed = *input_context.failed;
+    auto& global_skipped = *input_context.skipped;
+    bool (*cancelled)() = &mcp_cancelled_bridge;
     const char* phase_tag = "mcp_phase";
     const uint64_t phase_instance = g_mcp_phase_instance_counter.fetch_add(1, std::memory_order_acq_rel) + 1;
     const int enter_count = g_mcp_phase_enter_count.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -35710,9 +35725,9 @@ void phase_mcp_tests(HANDLE hf, std::atomic<int>& passed, std::atomic<int>& fail
         log_msg(hf, "mcp_phase", "MCP_PHASE_ENTER -- planned=%d instance=%llu server_present=%d server_running=%d port=%d registered_total=%zu registered_external=%zu registered_internal=%zu registered_ide_chat=%zu inventory_hash=0x%016llX target_pid=%u target_unavailable=%d",
             k_mcp_planned_tool_tests,
             static_cast<unsigned long long>(phase_instance),
-            srv ? 1 : 0,
-            srv && srv->is_running() ? 1 : 0,
-            srv ? srv->get_port() : 0,
+            inventory.server_present ? 1 : 0,
+            inventory.server_running ? 1 : 0,
+            inventory.port,
             inventory.total,
             inventory.external_visible,
             inventory.internal_only,
