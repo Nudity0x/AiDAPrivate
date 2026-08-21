@@ -69,6 +69,207 @@ Static analysis works without the kernel driver. Process manipulation,
 driver-backed debugging, some network capture features, and selected sandbox
 operations require additional privileges and a compatible WhosWho setup.
 
+## Why a Security Researcher Would Use It
+
+AiDA is aimed at investigations that keep crossing boundaries. The interesting
+part is not any one disassembler view, scanner, debugger panel, or AI chat. The
+interesting part is being able to move between them without throwing away the
+identity and context of the investigation.
+
+### Static facts can lead directly to runtime evidence
+
+Start with a function, string, import, structure, or call path in a binary.
+Then use the same investigation to examine the corresponding loaded module,
+live bytes, memory region, thread, register state, breakpoint event, or network
+activity in an authorized process.
+
+Useful comparisons include:
+
+- On-disk instructions versus the bytes currently mapped in memory
+- Recovered control flow versus an observed execution path
+- Static call sites versus arguments captured at a controlled API boundary
+- A suspected structure layout versus bytes read from a live target
+- A network parser in the binary versus the messages it actually processes
+- An AI explanation versus the disassembly, memory, and debugger evidence that
+  supports or contradicts it
+
+This is the central reason to download AiDA: it reduces the gap between “I
+found something interesting in the file” and “I have evidence for what it does
+when it runs.”
+
+### AI can operate on evidence, not only pasted code
+
+AiDA's AI integration can use structured workspace, debugger, scanner, network,
+emulation, and IDA MCP tools. A researcher can ask for a bounded investigation
+step, inspect the returned evidence, and continue from the result.
+
+The intended loop is:
+
+1. Select a function, target, request, memory region, or finding.
+2. Ask for an explanation, comparison, or next analysis step.
+3. Let the AI request explicit read or mutation tools.
+4. Review the tool result and the supporting evidence.
+5. Keep, reject, or refine the conclusion.
+
+AI output remains a hypothesis. AiDA's value is that the hypothesis can be
+checked against structured tool results instead of relying on a confident
+paragraph generated from incomplete pasted context.
+
+### The IDA plugin is more than a chat panel
+
+For IDA users, AiDA can expose functions, pseudocode context, references,
+types, comments, imports, segments, search results, analysis metadata, and
+vulnerability workflows through structured tools. It can also route requests
+to multiple running IDA databases by instance identity or process ID.
+
+That makes it possible to ask questions across several open samples or
+versions while keeping each request tied to the correct IDA instance. Read
+operations and database mutations are separate tool categories, so an AI
+workflow can gather context without implicitly renaming, retyping, annotating,
+or patching the database.
+
+### Findings can remain connected to their evidence
+
+AiDA persists sessions, workspace facts, chat context, findings, network
+projects, scanner results, and analysis artifacts. Tool and AI activity can be
+reviewed alongside the target and analysis state that produced it.
+
+This helps with work that lasts longer than one sitting:
+
+- Keep a hypothesis and its supporting call path together
+- Return to a memory snapshot after restarting the application
+- Compare changes between target generations
+- Preserve rejected or unresolved hypotheses instead of losing them in chat
+- Revalidate proposed changes after the target or database changes
+
+Persistence is not an immutable forensic chain of custody. Stored sessions can
+contain sensitive binaries, memory-derived data, traffic, and credentials from
+the target environment.
+
+### Privileged functionality is an extension, not a startup gate
+
+The WhosWho driver adds selected live process, memory, debugger, network,
+kernel-symbol, and analysis-target capabilities. It is useful when an
+investigation requires more than static files, but AiDA Standalone does not
+become unusable when the driver is unavailable.
+
+The IDE can still be used for static work, sessions, AI-assisted reasoning,
+disassembly, workspace analysis, and many non-privileged tools. Driver-backed
+operations report their unavailable prerequisite instead of returning a fake
+empty result.
+
+### Network evidence is treated as research data
+
+AiDA combines code-side investigation with connection, packet, protocol, HTTP,
+browser, replay, comparison, crawler, and scanner workflows. That is useful
+when a protocol or web finding cannot be understood from requests alone:
+
+- Find the parser or serializer in the binary
+- Trace the code that handles a field
+- Observe the corresponding request or response
+- Compare normal and modified behavior
+- Record timing, status, length, hashes, reflection, JSON shape, or other
+  differential evidence
+- Link the result back to the code and target context
+
+These tools support authorized testing. They do not turn an automated result
+into a confirmed vulnerability without researcher review.
+
+### Test Lab makes the integration testable
+
+Many tools look impressive until a target disappears, a driver is missing, a
+worker is cancelled, or a browser sidecar fails. AiDA includes an in-app Test
+Lab and controlled `AiDA_TestTarget` fixture for exercising analysis,
+debugger, memory, network, MCP, sandbox, and driver-related workflows.
+
+Test Lab distinguishes successful behavior from unavailable prerequisites,
+timeouts, crashes, malformed results, cancellation, and cleanup failures. It
+is useful both for contributors and for researchers who want to verify the
+local environment before trusting a larger investigation.
+
+## Research Workflows
+
+### Unfamiliar binary to runtime explanation
+
+1. Open the binary in AiDA Standalone.
+2. Review format metadata, imports, exports, strings, recovered functions,
+   references, and control flow.
+3. Select a suspicious function or data path and ask the AI for a structured
+   explanation.
+4. Open the relevant disassembly, types, and cross-references.
+5. Attach to an authorized test process when static evidence is insufficient.
+6. Compare loaded modules, live bytes, memory regions, threads, registers, and
+   debug events with the workspace facts.
+7. Save the conclusion, unresolved assumptions, and supporting snapshots.
+
+### Candidate vulnerability to reviewable evidence
+
+1. Identify a dangerous call, input source, dispatcher, parser, or check.
+2. Trace references, call relationships, data flow, and reachable validation.
+3. Use bounded taint, microcode, emulation, or solver-assisted analysis where
+   the model fits the question.
+4. Validate important assumptions against a controlled fixture or live target.
+5. Record the candidate chain, evidence, rejected paths, and remaining gaps.
+6. Treat the result as confirmed only when direct evidence supports the claim.
+
+### API boundary to application behavior
+
+1. Locate the relevant file, socket, HTTP, security, or IOCTL boundary in the
+   binary.
+2. Resolve the function in an authorized target and inspect selected call
+   context or bounded argument data.
+3. Observe related connections, requests, responses, or browser actions.
+4. Compare normal and modified inputs using the network workspace.
+5. Preserve the response evidence, timing, hashes, and code references.
+
+### Multiple IDA databases with one AI workflow
+
+1. Open the samples or versions in separate IDA instances.
+2. Connect AiDA's IDA MCP integration to the running instances.
+3. Route reads to one instance or compare read-only facts across instances.
+4. Keep names, comments, types, and patches scoped to the intended database.
+5. Review every mutating operation before applying it.
+
+### Static library recognition to type recovery
+
+AiDA's standalone analysis includes FLIRT-oriented recognition infrastructure,
+RTTI and virtual-table inspection, and type-seed export paths. In practice,
+recognized library functions can improve the context available for prototype,
+class, and inheritance analysis instead of ending as isolated labels.
+
+## Capability Matrix
+
+| Research question | AiDA surface | Evidence produced | Main dependency |
+| --- | --- | --- | --- |
+| What is inside this file? | Standalone workspace or IDA plugin | Sections, imports, exports, strings, functions, references, types | Input format and successful analysis |
+| What does this function do? | Disassembly, pseudocode, AI context | Instructions, control flow, callers, callees, types, explanation | Analysis quality and available decompiler context |
+| Does it behave differently at runtime? | Live target, debugger, snapshots | Live bytes, modules, threads, registers, memory, events | Authorized target, permissions, often WhosWho |
+| Where does an input reach? | Vulnerability and data-flow tools | Candidate source-to-sink paths and check coverage | Supported representation and manual validation |
+| What does the program send? | Network workspace and Camoufox | Connections, flows, requests, responses, timing, browser context | Local network setup and authorized traffic |
+| Can a code path be explored safely? | Emulation and verification | Bounded execution state and solver/model results | Appropriate bounded model; not full-system emulation |
+| Can the result be reproduced? | Test Lab and controlled target | Pass, failure, timeout, crash, cancellation, prerequisite, cleanup status | Local fixtures, services, driver, browser, permissions |
+| Can an AI help without losing control? | MCP and session tools | Structured reads, explicit mutations, logs, saved context | Trusted local client and configured provider |
+
+## Reasons to Try AiDA
+
+AiDA is worth evaluating if your work repeatedly moves between a disassembler,
+debugger, memory scanner, network tool, notes, and an AI client. It is
+especially relevant when you want:
+
+- Static and live evidence in one investigation
+- AI requests grounded in structured tool results
+- A standalone workspace plus an IDA-native integration
+- Optional privileged capabilities without making the entire IDE driver-bound
+- Explicit distinction between inspection and mutation
+- Persistent context, findings, and evidence across sessions
+- A local-first tool without an AiDA account or telemetry service
+- A Test Lab that reports environmental failures instead of hiding them
+
+AiDA is less suitable if you need a polished commercial support contract,
+identical analysis depth across every format and architecture, guaranteed
+sandbox isolation, or demonstrated parity with established specialist
+debuggers, decompilers, and web-security suites.
+
 ## What AiDA Does
 
 ### Binary Workspaces
