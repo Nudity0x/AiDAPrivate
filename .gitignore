@@ -11,6 +11,7 @@
 !/docs/
 !/camoufox-reverse-mcp/
 !/sources/
+!/libdecomp/
 
 # Allow essential project configuration files
 !.gitignore
@@ -89,7 +90,6 @@ models.json
 /bot/
 /firebase/
 /ida-sdk/
-/libdecomp/
 /libs/
 /mapper/
 /packaging/
