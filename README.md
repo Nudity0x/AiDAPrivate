@@ -1,6 +1,6 @@
 # AiDA
 
-> **THIS REPOSITORY IS ACTIVELY MAINTAINED.** Development is live, commits land frequently, and the project is under very active construction (a full Qt port of the standalone IDE is currently in flight). **Contributors are welcome** — feel free to open issues, start discussions, and submit pull requests. If you want to help, jump in: bug reports, feature ideas, documentation, tests, and code are all appreciated. If you plan a large change, open an issue first so we can coordinate, because big refactors land often and we don't want you rebasing onto a moving floor.
+> **THIS REPOSITORY IS ACTIVELY MAINTAINED.** Development is live, commits land frequently, and the project is under very active construction. **Contributors are welcome** — feel free to open issues, start discussions, and submit pull requests. If you want to help, jump in: bug reports, feature ideas, documentation, tests, and code are all appreciated. If you plan a large change, open an issue first so we can coordinate, because big refactors land often and we don't want you rebasing onto a moving floor.
 
 ![Maintenance](https://img.shields.io/badge/maintenance-active-brightgreen)
 ![Platform](https://img.shields.io/badge/platform-Windows%2010%2F11%20x64-blue)
