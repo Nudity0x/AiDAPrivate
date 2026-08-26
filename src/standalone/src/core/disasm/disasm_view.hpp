@@ -3,7 +3,6 @@
 #include "../analysis/workspace/analysis_workspace.hpp"
 
 #include <atomic>
-#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -17,6 +16,10 @@
 
 struct DisasmFile;
 struct DisasmState;
+
+namespace aida::analysis {
+struct overlay_operation_t;
+}
 
 namespace disasm_view {
 
@@ -110,8 +113,6 @@ struct state_t {
     addr_format_t addr_format = addr_format_t::va;
     bool show_bytes = true;
     std::optional<std::uint64_t> display_image_base;
-    bool banner_selected_all = false;
-    std::size_t banner_selected_line = 0;
     std::uint64_t metadata_signature = 0;
     std::vector<metadata_line_t> metadata_lines;
     int active_section = -1;
@@ -119,15 +120,7 @@ struct state_t {
     float target_scroll_y = 0.0f;
     bool scroll_restore_pending = false;
     bool scroll_to_selection = false;
-    bool goto_visible = false;
-    char goto_buf[192] = {};
-    bool xref_popup_open = false;
-    aida::analysis::address_t xref_popup_address;
-    char xref_popup_filter[96] = {};
-    int xref_popup_selected = -1;
-    std::vector<xref_popup_entry_t> xref_results;
     std::atomic<bool> xref_scanning{false};
-    std::vector<bookmark_t> bookmarks;
     std::unordered_map<aida::analysis::entity_id_t, formatted_instruction_t> formatted;
     std::atomic<std::uint64_t> formatted_revision{0};
     struct bookmark_cache_t {
@@ -136,23 +129,6 @@ struct state_t {
         std::uint64_t overlay_revision = 0;
     };
     bookmark_cache_t bookmark_cache;
-    struct nav_band_cache_t {
-        std::vector<std::uint32_t> colors;
-        const void* instructions = nullptr;
-        std::size_t range_first = 0;
-        std::size_t range_second = 0;
-        std::size_t marker_step = 0;
-        std::uint64_t formatted_revision = 0;
-    };
-    nav_band_cache_t nav_band_cache;
-    struct prefix_width_cache_t {
-        float width = 0.0f;
-        int addr_format = -1;
-        const void* font = nullptr;
-        std::uint64_t sections_revision = 0;
-        bool valid = false;
-    };
-    prefix_width_cache_t prefix_width_cache;
     std::unordered_set<std::uint64_t> pending_format_pages;
     std::uint64_t cached_generation = 0;
     std::uint64_t cached_analysis_revision = 0;
@@ -163,31 +139,12 @@ struct state_t {
     std::uint64_t derived_publication_revision = 0;
     std::uint64_t derived_publication_target_revision = 0;
     std::string derived_publication_error;
-    bool rebase_popup_open = false;
-    char rebase_buf[64] = {};
-    std::string rebase_error;
     std::atomic<bool> export_pending{false};
     std::string export_error;
     std::string export_status;
     std::atomic<std::uint32_t> pending_mutations{0};
-    bool static_patch_open = false;
-    bool static_patch_focus_input = false;
-    static_patch_mode_t static_patch_mode = static_patch_mode_t::bytes;
-    aida::analysis::address_t static_patch_address;
-    std::uint64_t static_patch_extent = 0;
-    std::uint64_t static_patch_generation = 0;
-    std::uint64_t static_patch_analysis_revision = 0;
-    std::uint64_t static_patch_overlay_revision = 0;
-    bool static_patch_existing = false;
-    std::uint64_t static_patch_existing_size = 0;
-    std::vector<std::uint8_t> static_patch_original;
-    std::vector<std::uint8_t> static_patch_proposed;
-    std::array<char, 196609> static_patch_input{};
-    std::array<char, 256> static_patch_description{};
-    std::string static_patch_error;
-    std::string static_patch_parse_error;
-    std::string static_patch_status;
     bool selection_initialized = false;
+    std::atomic<std::uint64_t> ui_serial{0};
     std::mutex mutex;
 };
 
@@ -251,7 +208,35 @@ void request_format_range(const workspace_context_t& context,
 std::optional<formatted_instruction_t> formatted_instruction(
     const workspace_context_t& context, aida::analysis::entity_id_t instruction_id);
 
+std::optional<std::pair<std::size_t, std::size_t>> instruction_range(
+    const workspace_context_t& context);
+std::string address_label(const workspace_context_t& context,
+                          const aida::analysis::address_t& address,
+                          addr_format_t format);
+std::optional<std::uint64_t> parse_address_text(
+    const workspace_context_t& context, std::string text);
+std::uint64_t display_image_base(const workspace_context_t& context);
+const aida::analysis::pe_section_t* section_for(
+    const workspace_context_t& context, const aida::analysis::address_t& address);
+bool queue_overlay_presentation_retry(const workspace_context_t& context);
+
 using overlay_completion_t = std::function<void(bool, std::string)>;
+
+bool queue_overlay_transaction(
+    const workspace_context_t& context,
+    std::vector<aida::analysis::overlay_operation_t> operations,
+    std::optional<std::uint64_t> required_generation = {},
+    std::optional<std::uint64_t> required_analysis_revision = {},
+    std::optional<std::uint64_t> required_overlay_revision = {},
+    overlay_completion_t completion = {});
+
+std::optional<std::vector<std::uint8_t>> decode_patch_bytes(
+    std::string_view encoded, std::string& error);
+
+bool queue_overlay_history(const workspace_context_t& context, bool redo,
+                           std::uint64_t expected_generation,
+                           std::uint64_t expected_analysis_revision,
+                           std::uint64_t expected_overlay_revision);
 
 bool queue_comment(const workspace_context_t& context,
                    const aida::analysis::address_t& address,
@@ -273,6 +258,28 @@ bool queue_bookmark(const workspace_context_t& context,
 bool queue_patch(const workspace_context_t& context,
                  const aida::analysis::address_t& address,
                  std::vector<std::uint8_t> bytes);
+
+struct static_patch_init_t {
+    static_patch_mode_t mode = static_patch_mode_t::bytes;
+    aida::analysis::address_t address;
+    std::uint64_t extent = 0;
+    std::uint64_t generation = 0;
+    std::uint64_t analysis_revision = 0;
+    std::uint64_t overlay_revision = 0;
+    bool existing = false;
+    std::uint64_t existing_size = 0;
+    std::vector<std::uint8_t> original;
+    std::vector<std::uint8_t> proposed;
+    std::string encoded;
+    std::string description;
+    std::string status;
+    bool focus_input = false;
+};
+
+using static_patch_review_hook_t =
+    std::function<bool(const workspace_context_t&, static_patch_init_t)>;
+void set_static_patch_review_hook(static_patch_review_hook_t hook);
+
 bool open_static_patch_review(const workspace_context_t& context,
                               const aida::analysis::address_t& address,
                               std::uint64_t extent,
@@ -289,7 +296,20 @@ bool open_exact_static_patch_review(const workspace_context_t& context,
                                     std::string* error = nullptr);
 bool open_selected_patch_review(static_patch_mode_t mode,
                                 std::string* error = nullptr);
-void render_static_patch_workflow();
+
+using dialog_open_hook_t =
+    std::function<void(const workspace_context_t&, const aida::analysis::address_t&)>;
+using rebase_dialog_hook_t = std::function<void(const workspace_context_t&)>;
+void set_rename_dialog_hook(dialog_open_hook_t hook);
+void set_comment_dialog_hook(dialog_open_hook_t hook);
+void set_rebase_dialog_hook(rebase_dialog_hook_t hook);
+bool request_rename_dialog(const workspace_context_t& context,
+                           const aida::analysis::address_t& address);
+bool request_comment_dialog(const workspace_context_t& context,
+                            const aida::analysis::address_t& address);
+
+bool apply_rebase(const workspace_context_t& context, std::uint64_t new_base,
+                  std::string* error = nullptr);
 bool queue_type_application(const workspace_context_t& context,
                             const aida::analysis::address_t& address,
                             std::string type,
@@ -307,10 +327,6 @@ bool queue_type_declaration_and_application(
 mutation_state_t mutation_state(const workspace_context_t& context);
 bool queue_overlay_undo(const workspace_context_t& context);
 bool queue_overlay_redo(const workspace_context_t& context);
-
-void render(float pos_x, float pos_y, float width, float height,
-            float alpha, float accent_r, float accent_g, float accent_b,
-            const workspace_context_t& context, float dt);
 
 void goto_address(std::uint64_t address, const workspace_context_t& context);
 void goto_address(const aida::analysis::address_t& address,

@@ -3,8 +3,6 @@
 #include "../disasm/disasm_view.hpp"
 #include "../workbench/workbench_shell_integration.hpp"
 
-#include "imgui/imgui.h"
-
 #include <utility>
 #include <algorithm>
 #include <memory>
@@ -516,12 +514,6 @@ capability_result_t evaluate(capability_t capability,
 		context.source == source_t::static_binary)
 		return denied("This scanner selection has no static Hex reader; open the binary Hex document instead.");
 	return allowed();
-}
-
-bool context_key_pressed() {
-	const ImGuiIO& io = ImGui::GetIO();
-	return ImGui::IsKeyPressed(ImGuiKey_Menu, false) ||
-		(io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F10, false));
 }
 
 }

@@ -301,7 +301,7 @@ tool_result_t handle_plan_exit(const json& params)
         cm.is_user = true;
         cm.timestamp = now_ms;
         g_chat_messages.push_back(cm);
-        g_chat_scroll_to_bottom = true;
+        aida::automation_ui::request_chat_scroll_to_bottom();
     }
 
     if (!aida::agent::set_active_agent("build"))

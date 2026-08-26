@@ -82,7 +82,7 @@ inline void log_observer_start(DWORD pid, HWND hwnd) {
     opts.reason = "out_of_process_diagnostics_observer_started";
     opts.owner_subsystem = "diagnostics_observer";
     opts.force = true;
-    metadata_ring::emit(std::move(opts));
+    metadata_ring::emit_breadcrumb(std::move(opts));
 }
 
 inline void log_observer_heartbeat(std::uint64_t poll_index, DWORD pid, HWND hwnd, bool process_alive, bool hwnd_responsive) {
@@ -195,7 +195,7 @@ inline void log_observer_hang(const observer_hang_record_t& rec) {
     opts.reason = "ui_thread_unresponsive";
     opts.owner_subsystem = "diagnostics_observer";
     opts.force = true;
-    metadata_ring::emit(std::move(opts));
+    metadata_ring::emit_breadcrumb(std::move(opts));
 }
 
 inline void log_observer_stop() {
@@ -213,7 +213,7 @@ inline void log_observer_stop() {
     opts.reason = "out_of_process_diagnostics_observer_stopped";
     opts.owner_subsystem = "diagnostics_observer";
     opts.force = true;
-    metadata_ring::emit(std::move(opts));
+    metadata_ring::emit_breadcrumb(std::move(opts));
 }
 
 inline void observer_loop(DWORD pid, HWND hwnd) {

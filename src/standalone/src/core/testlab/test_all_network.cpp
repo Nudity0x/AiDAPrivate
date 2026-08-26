@@ -3928,7 +3928,7 @@ namespace {
             state.active ? "true" : "false",
             static_cast<int>(state.active_tab),
             tab_count,
-            state.conn_auto_refresh ? "true" : "false",
+            state.conn_auto_refresh_enabled.load(std::memory_order_acquire) ? "true" : "false",
             state.cap_max_packets);
         log_msg(hf, tag, "PASS -- network_view state fields readable");
         passed.fetch_add(1);

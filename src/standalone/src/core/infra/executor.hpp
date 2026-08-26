@@ -1,10 +1,5 @@
 #pragma once
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-
-#include "../../preview/executor_preview.hpp"
-
-#else
 
 #include <atomic>
 #include <cstddef>
@@ -250,7 +245,7 @@ inline void emit_breadcrumb(domain_t domain, const char* event, const submission
     opts.generation = sub.generation;
     opts.status_code = status_code;
     opts.priority = static_cast<std::uint8_t>(sub.priority > 5 ? 5 : sub.priority);
-    aida::diagnostics::emit(std::move(opts));
+    aida::diagnostics::emit_breadcrumb(std::move(opts));
 }
 
 inline void emit_simple_breadcrumb(domain_t domain, const char* label, const char* owner, const char* event, std::uint16_t status_code) {
@@ -260,7 +255,7 @@ inline void emit_simple_breadcrumb(domain_t domain, const char* label, const cha
     opts.reason = event;
     opts.owner_subsystem = owner ? owner : "<unknown>";
     opts.status_code = status_code;
-    aida::diagnostics::emit(std::move(opts));
+    aida::diagnostics::emit_breadcrumb(std::move(opts));
 }
 
 inline submit_result_t reject_submission(const submission_t& sub, const char* reason) {
@@ -629,7 +624,7 @@ inline bool shutdown() {
         opts.reason = "EXECUTOR-SNAPSHOT";
         opts.owner_subsystem = "executor";
         opts.status_code = 5;
-        aida::diagnostics::emit(std::move(opts));
+        aida::diagnostics::emit_breadcrumb(std::move(opts));
     }
     auto runtime_snap = aida::infra::taskflow_runtime::active_snapshot(128);
     for (const auto& job : runtime_snap.active_jobs) {
@@ -755,4 +750,3 @@ inline shutdown_guard_t g_shutdown_guard;
 
 }
 
-#endif

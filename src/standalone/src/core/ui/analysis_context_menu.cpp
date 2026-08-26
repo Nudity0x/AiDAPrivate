@@ -2,8 +2,6 @@
 
 #include "application_ui_runtime.hpp"
 
-#include "imgui/imgui.h"
-
 #include <utility>
 
 namespace aida::ui::analysis_context_menu {
@@ -41,7 +39,18 @@ stable_view_id_t active_view(menu_kind_t kind) {
     return stable_view_id_t("document.disassembly");
 }
 
-application_ui::retained_entity_context_t make_retained(context_t context) {
+retained_display_hook_t& retained_display_hook_slot() {
+    static retained_display_hook_t hook;
+    return hook;
+}
+
+}
+
+void set_retained_display_hook(retained_display_hook_t hook) {
+    retained_display_hook_slot() = std::move(hook);
+}
+
+application_ui::retained_entity_context_t make_retained_context(context_t context) {
     application_ui::retained_entity_context_t retained;
     retained.owner_id = k_owner;
     retained.entity_id = context.entity_id.empty()
@@ -78,33 +87,16 @@ application_ui::retained_entity_context_t make_retained(context_t context) {
     return retained;
 }
 
-}
-
 void open(context_t context, context_menu_open_origin_t origin) {
-    application_ui::open_retained_entity_context_menu(
-        make_retained(std::move(context)), origin);
+    auto retained = make_retained_context(std::move(context));
+    if (retained_display_hook_slot())
+        retained_display_hook_slot()(std::move(retained), origin);
 }
 
 bool execute_shortcut(context_t context, const char* action_id) {
-    const auto retained = make_retained(std::move(context));
+    const auto retained = make_retained_context(std::move(context));
     return application_ui::execute_retained_entity_action(action_id,
         action_invocation_source_t::shortcut, retained).executed();
-}
-
-void render() {
-    application_ui::render_retained_entity_context_menu(k_owner);
-}
-
-bool keyboard_request(context_menu_open_origin_t& origin) {
-    if (ImGui::IsKeyPressed(ImGuiKey_Menu, false)) {
-        origin = context_menu_open_origin_t::menu_key;
-        return true;
-    }
-    if (ImGui::GetIO().KeyShift && ImGui::IsKeyPressed(ImGuiKey_F10, false)) {
-        origin = context_menu_open_origin_t::shift_f10;
-        return true;
-    }
-    return false;
 }
 
 }

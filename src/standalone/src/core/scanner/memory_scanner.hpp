@@ -16,9 +16,6 @@
 #include <vector>
 
 #include "../runtime/standalone_driver_identity.hpp"
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-#include "../../preview/preview_fixture_controls.hpp"
-#endif
 
 namespace aida::analysis {
 class byte_provider_t;
@@ -145,7 +142,7 @@ struct scan_config_t {
 
 struct state_t {
 	std::mutex                     results_mutex;
-	std::vector<scan_result_t>     results;
+	std::shared_ptr<const std::vector<scan_result_t>> results;
 	size_t                         total_found = 0;
 
 	std::mutex                     address_mutex;
@@ -172,7 +169,7 @@ struct state_t {
 	uint64_t                       pointer_target_epoch = 0;
 	driver_bridge::identity::live_target_identity_t pointer_target_identity;
 
-	std::vector<std::vector<scan_result_t>> scan_history;
+	std::vector<std::shared_ptr<const std::vector<scan_result_t>>> scan_history;
 
 	std::mutex                         target_binding_mutex;
 	std::atomic<uint32_t>              observed_target_pid{0};
@@ -191,9 +188,10 @@ struct state_t {
 
 inline state_t g_state;
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-#include "../../preview/scan_memory_preview.inl"
-#else
+using progress_sink_fn = std::function<void(float progress, const char* stage,
+	uint64_t generation)>;
+void set_scan_progress_sink(progress_sink_fn sink);
+
 void initialize();
 void shutdown();
 
@@ -227,6 +225,5 @@ void cancel_pointer_scan();
 
 std::string format_value(const std::vector<uint8_t>& bytes, value_type_t type);
 std::vector<uint8_t> parse_value(const std::string& text, value_type_t type, bool hex);
-#endif
 
 }

@@ -20,13 +20,11 @@
 #include "event_bus.hpp"
 #include "mcp_client.hpp"
 #include "session_store.hpp"
-#include "settings_overlay.hpp"
 #include "skills.hpp"
 #include "standalone_chat.hpp"
 #include "standalone_settings.hpp"
 
 #include "../helpers/diag_log.hpp"
-#include "../ui/application_view_registry.hpp"
 #include "../ui/application_ui_runtime.hpp"
 
 
@@ -407,54 +405,52 @@ namespace commands {
 		                          std::string& out_text)
 		{
 			(void)args;
-			const auto result = aida::ui::application_views::open_or_focus(
-				aida::ui::stable_view_id_t(target));
-			out_text = result.ok() ? "[view] switched" :
-				"[view] unavailable: " + result.detail;
-			return result.ok();
+			const std::string action_id = std::string("view.focus.") + (target ? target : "");
+			const auto result = aida::ui::application_ui::execute_action(action_id.c_str(),
+				aida::ui::action_invocation_source_t::command_palette);
+			out_text = result.executed() ? "[view] switched" :
+				"[view] unavailable: " + result.message;
+			return result.executed();
 		}
 
 
 		bool resolver_open_settings(const std::vector<std::string>& args, std::string& out_text)
 		{
 			(void)args;
-			aida::settings_overlay::open();
-			out_text = "[settings] opened";
-			return true;
+			const auto result = aida::ui::application_ui::execute_action("view.focus.view.settings",
+				aida::ui::action_invocation_source_t::command_palette);
+			out_text = result.executed() ? "[settings] opened" : "[settings] unavailable: " + result.message;
+			return result.executed();
 		}
 
 
 		bool resolver_toggle_left(const std::vector<std::string>& args, std::string& out_text)
 		{
 			(void)args;
-			const aida::ui::stable_view_id_t id("view.project_explorer");
-			const auto result = aida::ui::application_views::is_open(id)
-				? aida::ui::application_views::close(id)
-				: aida::ui::application_views::open_or_focus(id);
-			out_text = result.ok() ? "[view] project explorer toggled" : "[view] project explorer unavailable: " + result.detail;
-			return result.ok();
+			const auto result = aida::ui::application_ui::execute_action("view.manage.view.project_explorer",
+				aida::ui::action_invocation_source_t::command_palette);
+			out_text = result.executed() ? "[view] project explorer toggled" : "[view] project explorer unavailable: " + result.message;
+			return result.executed();
 		}
 
 
 		bool resolver_toggle_right(const std::vector<std::string>& args, std::string& out_text)
 		{
 			(void)args;
-			aida::settings_overlay::toggle();
-			out_text = aida::settings_overlay::is_open()
-				? "[settings] opened" : "[settings] closed";
-			return true;
+			const auto result = aida::ui::application_ui::execute_action("view.manage.view.settings",
+				aida::ui::action_invocation_source_t::command_palette);
+			out_text = result.executed() ? "[settings] toggled" : "[settings] unavailable: " + result.message;
+			return result.executed();
 		}
 
 
 		bool resolver_toggle_bottom(const std::vector<std::string>& args, std::string& out_text)
 		{
 			(void)args;
-			const aida::ui::stable_view_id_t id("view.output");
-			const auto result = aida::ui::application_views::is_open(id)
-				? aida::ui::application_views::close(id)
-				: aida::ui::application_views::open_or_focus(id);
-			out_text = result.ok() ? "[view] output toggled" : "[view] output unavailable: " + result.detail;
-			return result.ok();
+			const auto result = aida::ui::application_ui::execute_action("view.manage.view.output",
+				aida::ui::action_invocation_source_t::command_palette);
+			out_text = result.executed() ? "[view] output toggled" : "[view] output unavailable: " + result.message;
+			return result.executed();
 		}
 
 
@@ -830,6 +826,12 @@ namespace commands {
 		}
 
 
+	}
+
+
+	int fuzzy_score_text(const std::string& query_lower, const std::string& target_lower)
+	{
+		return fuzzy_score(query_lower, target_lower);
 	}
 
 

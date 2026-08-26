@@ -1,6 +1,5 @@
 #define AIDA_C03_AUTH_BROWSER_FIXTURE 1
 
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -10,7 +9,6 @@
 #include <WinSock2.h>
 #include <WS2tcpip.h>
 #include <Windows.h>
-#endif
 
 #include "auth_browser_dispatch_harness.hpp"
 #include "../../../src/core/auth/auth_browser_launch.hpp"
@@ -63,11 +61,7 @@ struct harness_log_t {
     static unsigned long tid() { return static_cast<unsigned long>(std::hash<std::thread::id>{}(std::this_thread::get_id())); }
     static std::uint64_t epoch_ms() { return std::chrono::duration_cast<std::chrono::milliseconds>(clock_t::now().time_since_epoch()).count(); }
     static unsigned long win32_error() {
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
         return GetLastError();
-#else
-        return 0;
-#endif
     }
     static void emit(const char* test, const char* phase, const char* status, std::uint64_t elapsed_ms, const std::string& detail = {}) {
         std::fprintf(stderr, "[C03-HARNESS] test=%s phase=%s status=%s elapsed=%llums pid=%lu tid=%lu errno=%d gle=%lu detail=%s\n",
@@ -114,9 +108,7 @@ struct fake_browser_t {
             while (block_ready && !release_ready) cv.wait(lock);
             --active;
         }
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
         if (seh_ready) RaiseException(0xE1234001u, 0, 0, nullptr);
-#endif
         if (throw_ready) throw std::runtime_error("fixture_ready_exception");
         return ready_result;
     }
@@ -130,9 +122,7 @@ struct fake_browser_t {
 
     void log(const std::string&)
     {
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
         if (seh_log) RaiseException(0xE1234002u, 0, 0, nullptr);
-#endif
         if (throw_log) throw std::runtime_error("fixture_log_exception");
     }
 
@@ -162,7 +152,6 @@ detail::browser_operation_adapter_t adapter_for(const std::shared_ptr<fake_brows
     return adapter;
 }
 
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 struct socket_guard_t {
 	SOCKET value = INVALID_SOCKET;
 	~socket_guard_t() noexcept { if (value != INVALID_SOCKET) closesocket(value); }
@@ -373,7 +362,6 @@ void wait_provider_terminal(const State& state)
 	require(state.done.load(std::memory_order_acquire),
 		"provider listener did not publish terminal state before deadline");
 }
-#endif
 
 void wait_terminal(const std::atomic<unsigned>& count, unsigned expected)
 {
@@ -438,63 +426,6 @@ void test_canonical_urls()
         require(!canonicalize_external_url(value).accepted, "malformed URL was admitted");
 }
 
-void test_preview_fail_closed_paths()
-{
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-	reset_browser_operation_fixture();
-	require(!open_url_external("https://example.com/preview-default"),
-		"preview default browser adapter fabricated a synchronous open");
-	std::atomic<unsigned> completion{0};
-	browser_open_result_t result = browser_open_result_t::opened;
-	const auto submitted = submit_open_url_external("https://example.com/preview-default",
-		[&](const browser_open_completion_t& value) {
-			result = value.result;
-			completion.fetch_add(1, std::memory_order_acq_rel);
-		});
-	require(submitted.submitted, "preview fail-closed operation did not retain async task identity");
-	aida::infra::executor::wait_for(submitted.task_id, 5000);
-	wait_terminal(completion, 1);
-	require(result == browser_open_result_t::ensure_ready_failed,
-		"preview default browser adapter did not publish typed unavailability");
-	require(browser_physical_in_flight() == 0,
-		"preview fail-closed browser operation retained capacity");
-
-	auto codex_state = std::make_shared<codex::codex_login_state_t>();
-	auto claude_state = std::make_shared<claude_code::claude_code_login_state_t>();
-	copilot::copilot_login_state_t copilot_state;
-	require(!codex::start_login(*codex_state), "preview Codex fabricated login startup");
-	require(!copilot::start_login(copilot_state, std::optional<std::string>{}),
-		"preview Copilot fabricated login startup");
-	require(!claude_code::start_login(*claude_state),
-		"preview Claude fabricated login startup");
-	const auto codex_value = codex::snapshot(*codex_state);
-	const auto copilot_value = copilot::snapshot(copilot_state);
-	const auto claude_value = claude_code::snapshot(*claude_state);
-	require(codex_value.done && codex_value.terminal_phase == 2
-		&& codex_value.auth_url.empty() && codex_value.received_code.empty(),
-		"preview Codex failure was not typed and secret-free");
-	require(copilot_value.done && copilot_value.terminal_phase == 2
-		&& copilot_value.device_code.empty() && copilot_value.user_code.empty(),
-		"preview Copilot failure was not typed and secret-free");
-	require(claude_value.done && claude_value.terminal_phase == 2
-		&& claude_value.auth_url.empty() && claude_value.received_code.empty(),
-		"preview Claude failure was not typed and secret-free");
-	auth_info_t info;
-	info.kind = auth_kind_t::api;
-	info.api_key = "fixture-secret";
-	std::atomic<unsigned> commit_guard_calls{0};
-	require(!store::set_if("fixture-provider", info, [&]() {
-		commit_guard_calls.fetch_add(1, std::memory_order_acq_rel);
-		return true;
-	}), "preview auth store fabricated a durable credential write");
-	require(commit_guard_calls.load(std::memory_order_acquire) == 0,
-		"preview auth store invoked a commit guard without a durable backend");
-	std::vector<std::pair<std::string, auth_info_t>> stored;
-	require(!store::all(stored) && stored.empty(),
-		"preview auth store fabricated a credential snapshot");
-#endif
-}
-
 void test_provider_model_response_semantics()
 {
 	const auto openai = aida::provider::catalog::validate_provider_model_list_response(
@@ -556,7 +487,6 @@ void test_allocation_submission_and_fault_terminals()
     require(browser_physical_in_flight() == 0, "throwing callback retained physical capacity");
 
 	fake->throw_log = false;
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
     fake->seh_log = true;
     auto seh_callback = submit_open_url_external("https://example.com/", [&](const browser_open_completion_t&) {
         completions.fetch_add(1, std::memory_order_acq_rel);
@@ -568,7 +498,6 @@ void test_allocation_submission_and_fault_terminals()
     require(browser_physical_in_flight() == 0, "SEH callback retained physical capacity");
 
     fake->seh_log = false;
-#endif
     fake->throw_ready = true;
     browser_open_result_t observed = browser_open_result_t::opened;
     auto ready_exception = submit_open_url_external("https://example.com/", [&](const browser_open_completion_t& value) {
@@ -581,7 +510,6 @@ void test_allocation_submission_and_fault_terminals()
 	require(browser_physical_in_flight() == 0, "operation exception retained physical capacity");
 
 	fake->throw_ready = false;
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 	fake->seh_ready = true;
 	observed = browser_open_result_t::opened;
 	auto ready_seh = submit_open_url_external("https://example.com/", [&](const browser_open_completion_t& value) {
@@ -594,7 +522,6 @@ void test_allocation_submission_and_fault_terminals()
 	require(browser_physical_in_flight() == 0, "operation SEH retained physical capacity");
 
 	fake->seh_ready = false;
-#endif
 	fake->navigate_result = false;
 	observed = browser_open_result_t::opened;
 	auto navigation_failure = submit_open_url_external("https://example.com/", [&](const browser_open_completion_t& value) {
@@ -855,7 +782,6 @@ void test_provider_terminal_claims_and_owned_errors()
 
 void test_real_provider_listener_routing()
 {
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 	auto fake = std::make_shared<fake_browser_t>();
 	install_browser_operation_fixture(adapter_for(fake));
 	auto codex_state = std::make_shared<codex::codex_login_state_t>();
@@ -923,7 +849,6 @@ void test_real_provider_listener_routing()
 		&& claude_value.received_code.empty(),
 		"Claude callback error did not publish one typed terminal state");
 	static_cast<void>(claude_code::cancel_login(*claude_state));
-#endif
 }
 
 void test_listener_state_raii_and_cancel_pending()
@@ -1016,7 +941,6 @@ void test_listener_state_raii_and_cancel_pending()
 
 void test_http_framing_completeness_and_limits()
 {
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 	{
 		loopback_http_server_t server(
 			"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok");
@@ -1127,7 +1051,6 @@ void test_http_framing_completeness_and_limits()
 			&& !response.truncated && !delivered,
 			"pre-cancelled HTTP stream entered transport or delivery");
 	}
-#endif
 }
 
 void test_shutdown_cancel_pending()
@@ -1176,16 +1099,6 @@ void test_shutdown_cancel_pending()
 	require(aida::infra::executor::shutdown(),
 		"non-worker shutdown retry did not complete after physical work returned");
     require(browser_physical_in_flight() == 0, "shutdown did not return physical capacity");
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-	aida::infra::taskflow_runtime::initialize();
-	aida::infra::taskflow_runtime::task_descriptor_t runtime_probe;
-	runtime_probe.owner_subsystem = "auth_browser";
-	runtime_probe.label = "auth.c03.post_shutdown_runtime_probe";
-	runtime_probe.body = []() {};
-	const auto runtime_rejected = aida::infra::taskflow_runtime::submit(std::move(runtime_probe));
-	require(!runtime_rejected.submitted,
-		"preview runtime reopened after completed shutdown");
-#endif
     std::atomic<unsigned> rejected_completion{0};
     auto rejected = submit_open_url_external("https://example.com/after-shutdown",
         [&](const browser_open_completion_t& value) {
@@ -1200,7 +1113,6 @@ void test_shutdown_cancel_pending()
 
 void test_refresh_cancellation_scope()
 {
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
     const http::cancel_cb_t cancelled = []() noexcept { return true; };
     require(!codex::refresh_token(cancelled, 1) &&
         codex::last_error().find("cancel") != std::string::npos,
@@ -1211,7 +1123,6 @@ void test_refresh_cancellation_scope()
     require(!claude_code::refresh_token(cancelled, 1) &&
         claude_code::last_error().find("cancel") != std::string::npos,
         "Claude refresh ignored the pre-cancelled operation scope");
-#endif
 }
 
 }
@@ -1226,12 +1137,6 @@ bool run_auth_browser_dispatch_harness(std::string& failure)
             harness_log_t::emit("auth_browser_dispatch", "test_canonical_urls", "enter", 0);
             test_canonical_urls();
             harness_log_t::emit("auth_browser_dispatch", "test_canonical_urls", "pass", harness_log_t::epoch_ms() - phase_start);
-        }
-        {
-            const auto phase_start = harness_log_t::epoch_ms();
-            harness_log_t::emit("auth_browser_dispatch", "test_preview_fail_closed_paths", "enter", 0);
-            test_preview_fail_closed_paths();
-            harness_log_t::emit("auth_browser_dispatch", "test_preview_fail_closed_paths", "pass", harness_log_t::epoch_ms() - phase_start);
         }
         {
             const auto phase_start = harness_log_t::epoch_ms();

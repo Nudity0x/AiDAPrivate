@@ -81,7 +81,7 @@ struct driver_debugger_quota_guard_t
             opts.tool_or_request_id = tool_name.c_str();
             opts.lease_token = token;
             opts.status_code = 0;
-            aida::diagnostics::emit(std::move(opts));
+            aida::diagnostics::emit_breadcrumb(std::move(opts));
             mcp_standalone::downstream::governor_t::instance().release(token, "driver_debugger_scope_exit");
         }
         else
@@ -97,7 +97,7 @@ struct driver_debugger_quota_guard_t
             opts.tool_or_request_id = tool_name.c_str();
             opts.lease_token = token;
             opts.status_code = 1;
-            aida::diagnostics::emit(std::move(opts));
+            aida::diagnostics::emit_breadcrumb(std::move(opts));
         }
         token = 0;
     }
@@ -134,7 +134,7 @@ static std::optional<tool_result_t> acquire_driver_debugger_quota(
         opts.owner_subsystem = "debugger_tools";
         opts.tool_or_request_id = id.tool_name.c_str();
         opts.status_code = 1;
-        aida::diagnostics::emit(std::move(opts));
+        aida::diagnostics::emit_breadcrumb(std::move(opts));
         return tool_result_t::error(
             "Downstream driver/debugger capacity exhausted; work was not started.",
             "MCP_DOWNSTREAM_CAPACITY_REJECT",
@@ -155,7 +155,7 @@ static std::optional<tool_result_t> acquire_driver_debugger_quota(
     admit_opts.session_or_target = id.target_id.c_str();
     admit_opts.lease_token = result.admission_token;
     admit_opts.status_code = 0;
-    aida::diagnostics::emit(std::move(admit_opts));
+    aida::diagnostics::emit_breadcrumb(std::move(admit_opts));
 
     guard.token = result.admission_token;
     guard.tool_name = id.tool_name;
@@ -326,7 +326,7 @@ static cfg_wait_result_t wait_for_cfg_publication_idle(std::uint64_t timeout_ms)
         (std::numeric_limits<std::uint64_t>::max)() - timeout_ms
         ? (std::numeric_limits<std::uint64_t>::max)()
         : started + timeout_ms;
-    while (cfg_view::g_state.building.load(std::memory_order_acquire))
+    while (cfg_view::building())
     {
         if (mcp_standalone::current_call_cancelled())
             return cfg_wait_result_t::cancelled;
@@ -4281,7 +4281,7 @@ void register_debugger_tools(mcp_standalone::server_t& srv)
             const std::uint64_t call_deadline = mcp_standalone::current_call_deadline_ms();
             if (call_deadline != 0 && GetTickCount64() >= call_deadline)
                 return tool_result_t::error("Tool deadline expired before CFG read.");
-            if (cfg_view::g_state.building.load(std::memory_order_acquire))
+            if (cfg_view::building())
                 return tool_result_t::error("CFG publication is being rebuilt. Retry after the build completes.");
             cfg_publication_binding_t binding;
             {
@@ -4331,7 +4331,7 @@ void register_debugger_tools(mcp_standalone::server_t& srv)
                 bj["successors"] = blk.successors;
                 blocks_arr.push_back(std::move(bj));
             }
-            if (cfg_view::g_state.building.load(std::memory_order_acquire))
+            if (cfg_view::building())
                 return tool_result_t::error("CFG publication changed during the read.");
             const auto current_model = cfg_view::capture_model();
             if (!current_model || current_model->generation != model->generation)

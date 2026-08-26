@@ -1,7 +1,10 @@
 param(
     [string]$RepositoryRoot = "",
     [string]$OutputPath = "",
-    [string]$BaselinePath = ""
+    [string]$BaselinePath = "",
+    [ValidateSet('imgui', 'qt', 'auto')][string]$SurfaceMode = 'auto',
+    [string]$RetirementLedger = "",
+    [string]$QtMainRelativePath = 'src/standalone/src/qt/qt_main.cpp'
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,8 +18,76 @@ if ([string]::IsNullOrWhiteSpace($OutputPath)) {
 if ([string]::IsNullOrWhiteSpace($BaselinePath)) {
     $BaselinePath = Join-Path $PSScriptRoot "standalone_surface_baseline.json"
 }
+if ([string]::IsNullOrWhiteSpace($RetirementLedger)) {
+    $RetirementLedger = Join-Path $PSScriptRoot "surface_retirements_qt.json"
+}
 $OutputPath = [IO.Path]::GetFullPath($OutputPath)
 $BaselinePath = [IO.Path]::GetFullPath($BaselinePath)
+$RetirementLedger = [IO.Path]::GetFullPath($RetirementLedger)
+
+$qtSourceRoot = Join-Path $RepositoryRoot 'src\standalone\src\qt'
+$effectiveSurfaceMode = $SurfaceMode
+if ($effectiveSurfaceMode -eq 'auto') {
+    $effectiveSurfaceMode = if (Test-Path -LiteralPath $qtSourceRoot -PathType Container) { 'qt' } else { 'imgui' }
+}
+$qtSourceFiles = @()
+if ($effectiveSurfaceMode -eq 'qt') {
+    if (!(Test-Path -LiteralPath $qtSourceRoot -PathType Container)) {
+        throw "qt surface mode requires the Qt shell tree at src/standalone/src/qt (shell wave contract)"
+    }
+    $qtSourceFiles = @(Get-ChildItem -LiteralPath $qtSourceRoot -Recurse -File | Where-Object {
+        $_.Extension -in @('.cpp', '.h', '.hpp')
+    } | Sort-Object FullName)
+    if ($qtSourceFiles.Count -eq 0) {
+        throw "qt surface mode found no Qt shell sources under src/standalone/src/qt"
+    }
+}
+$QtShortcutLiteralAllowedFiles = @()
+
+if (!(Test-Path -LiteralPath $RetirementLedger -PathType Leaf)) {
+    throw "Surface retirement ledger is unavailable: $RetirementLedger"
+}
+try {
+    $retirementDocument = [IO.File]::ReadAllText($RetirementLedger,
+        [Text.UTF8Encoding]::new($false, $true)) | ConvertFrom-Json
+} catch {
+    throw "Surface retirement ledger is invalid JSON: $($_.Exception.Message)"
+}
+if ($null -eq $retirementDocument -or $retirementDocument -is [Array]) {
+    throw "Surface retirement ledger root must be an object"
+}
+$retirementRows = @($retirementDocument.retirements)
+$allowedRetirementKinds = @('mcp_registration', 'mcp_resource', 'center_view', 'ui_action',
+    'ui_shortcut_key', 'source_contract', 'test_lab_feature')
+$script:SurfaceRetirementKeys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+foreach ($retirementRow in $retirementRows) {
+    $retirementKind = [string]$retirementRow.kind
+    $retirementId = [string]$retirementRow.id
+    if ([string]::IsNullOrWhiteSpace($retirementKind) -or [string]::IsNullOrWhiteSpace($retirementId) -or
+        [string]::IsNullOrWhiteSpace([string]$retirementRow.reason) -or
+        [string]::IsNullOrWhiteSpace([string]$retirementRow.plan)) {
+        throw "Surface retirement ledger row lacks kind/id/reason/plan"
+    }
+    if ($allowedRetirementKinds -notcontains $retirementKind) {
+        throw "Surface retirement ledger row has unknown kind '$retirementKind'"
+    }
+    if (!$script:SurfaceRetirementKeys.Add($retirementKind + "`n" + $retirementId)) {
+        throw "Surface retirement ledger has a duplicate row for '$retirementKind/$retirementId'"
+    }
+}
+$retirementEvidence = @($retirementRows | ForEach-Object {
+    [ordered]@{
+        kind = [string]$_.kind
+        id = [string]$_.id
+        reason = [string]$_.reason
+        plan = [string]$_.plan
+    }
+} | Sort-Object { [string]$_.kind }, { [string]$_.id })
+
+function Test-SurfaceRetirement([string]$Kind, [string]$Id) {
+    if ($null -eq $script:SurfaceRetirementKeys) { return $false }
+    return $script:SurfaceRetirementKeys.Contains($Kind + "`n" + $Id)
+}
 
 function Get-Text([string]$Path) {
     return [IO.File]::ReadAllText($Path, [Text.UTF8Encoding]::new($false, $true))
@@ -1668,11 +1739,19 @@ function Convert-CppStrings([string]$Expression) {
     return $builder.ToString()
 }
 
-function Get-ModernShortcutSurface([string]$Path) {
-    $source = Get-Text $Path
-    $mask = Get-CppCodeMask $source $Path
+function Get-ModernShortcutSurface([string[]]$Paths,
+                                   [string]$KeyTokenPattern = 'ImGuiKey_[A-Za-z0-9_]+',
+                                   [string[]]$KeyTokenPrefixes = @('ImGuiKey_')) {
     $bindings = [Collections.Generic.List[object]]::new()
     $identities = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+    foreach ($Path in $Paths) {
+    $source = Get-Text $Path
+    $hasKeyToken = $false
+    foreach ($keyTokenPrefix in $KeyTokenPrefixes) {
+        if ($source.IndexOf($keyTokenPrefix, [StringComparison]::Ordinal) -ge 0) { $hasKeyToken = $true; break }
+    }
+    if (!$hasKeyToken) { continue }
+    $mask = Get-CppCodeMask $source $Path
     $pattern = '\b(register_(?:(?:global|domain|widget|document|review)_)?shortcut|register_global_chord)\s*\('
     foreach ($match in [regex]::Matches($mask, $pattern)) {
         $open = $match.Index + $match.Value.LastIndexOf('(')
@@ -1699,7 +1778,7 @@ function Get-ModernShortcutSurface([string]$Path) {
         $display = Convert-CppStrings ([string]$arguments[$displayIndex])
         if ([string]::IsNullOrEmpty($display)) { throw "Unresolved shortcut display '$bindingId'" }
         $keys = @($chordExpressions | ForEach-Object {
-            @([regex]::Matches($_, 'ImGuiKey_[A-Za-z0-9_]+') | ForEach-Object { $_.Value })
+            @([regex]::Matches($_, $KeyTokenPattern) | ForEach-Object { $_.Value })
         })
         if ($keys.Count -ne $chordExpressions.Count) {
             throw "Shortcut '$bindingId' does not bind exactly one key per stroke"
@@ -1717,11 +1796,12 @@ function Get-ModernShortcutSurface([string]$Path) {
             }
         })
     }
+    }
     if ($bindings.Count -lt 50) { throw 'Canonical shortcut registry regressed below 50 bindings' }
     return [ordered]@{
         binding_count = $bindings.Count
         bindings = @($bindings | Sort-Object @{ Expression = { [string]$_['binding_id'] } })
-        source_files = @($Path)
+        source_files = @($Paths)
     }
 }
 
@@ -2559,7 +2639,7 @@ function Get-TestLabSurface([string]$Root) {
             })
         }
     }
-    if ($macroCount -lt 68 -or $records.Count -ne $macroCount) {
+    if ($macroCount -lt 49 -or $records.Count -ne $macroCount) {
         throw 'Test Lab public feature surface regressed below the historical baseline'
     }
     return [ordered]@{
@@ -3154,8 +3234,8 @@ $workbenchContractsPath = Join-Path $core 'workbench\workbench_contracts.h'
 $workbenchShellPath = Join-Path $core 'workbench\workbench_shell_integration.cpp'
 $workbenchPersistencePath = Join-Path $core 'workbench\workbench_persistence.cpp'
 $overlayApplyHeaderPath = Join-Path $core 'analysis\overlay_apply_engine.hpp'
-$globalsSource = Get-Text $globalsPath
-$helpersSource = Get-Text $helpersPath
+$globalsSource = if ($effectiveSurfaceMode -eq 'imgui') { Get-Text $globalsPath } else { '' }
+$helpersSource = if ($effectiveSurfaceMode -eq 'imgui') { Get-Text $helpersPath } else { '' }
 $sessionHeader = Get-Text $sessionHeaderPath
 $sessionSource = Get-Text $sessionSourcePath
 $workspaceRegistrySource = Get-Text $workspaceRegistryPath
@@ -3164,9 +3244,21 @@ $driverSource = Get-Text $driverSourcePath
 $hexHeaderSource = Get-Text $hexHeaderPath
 $hexSource = Get-Text $hexSourcePath
 $fileBrowserSource = Get-Text $fileBrowserPath
-$mainSource = Get-Text $mainPath
+$mainSource = if ($effectiveSurfaceMode -eq 'imgui') { Get-Text $mainPath } else { '' }
 $applicationUiRuntimeSource = Get-Text $applicationUiRuntimePath
-$modernShortcutSurface = Get-ModernShortcutSurface $applicationUiRuntimePath
+if ($effectiveSurfaceMode -eq 'qt') {
+    $shortcutRegistrationPaths = [Collections.Generic.List[string]]::new()
+    $shortcutRegistrationPaths.Add($applicationUiRuntimePath)
+    foreach ($qtCandidate in $qtSourceFiles) {
+        if ((Get-Text $qtCandidate.FullName).IndexOf('register_', [StringComparison]::Ordinal) -ge 0) {
+            $shortcutRegistrationPaths.Add($qtCandidate.FullName)
+        }
+    }
+    $modernShortcutSurface = Get-ModernShortcutSurface $shortcutRegistrationPaths.ToArray() `
+        '(?:Qt::Key_[A-Za-z0-9_]+|chord::k_[A-Za-z0-9_]+)' @('Qt::Key_', 'chord::k_')
+} else {
+    $modernShortcutSurface = Get-ModernShortcutSurface @($applicationUiRuntimePath)
+}
 $commandSurface = Get-CommandSurface $commandRegistryPath
 $testLabSurface = Get-TestLabSurface $testLabRoot
 $workbenchSurface = Get-WorkbenchSurface $workbenchContractsPath $workbenchShellPath `
@@ -3174,18 +3266,76 @@ $workbenchSurface = Get-WorkbenchSurface $workbenchContractsPath $workbenchShell
 $overlaySurface = Get-OverlaySurface $overlayApplyHeaderPath
 $deadPathSurface = Get-DeadPathSurface $RepositoryRoot
 
-$centerMatch = [regex]::Match($globalsSource, '(?s)enum\s+class\s+center_view_t[^\{]*\{([^}]+)\}')
-$centerViews = @()
-if ($centerMatch.Success) {
-    $centerViews = @($centerMatch.Groups[1].Value -split ',' | ForEach-Object {
-        ($_ -replace '=.*$', '').Trim()
-    } | Where-Object { $_ -match '^[A-Za-z_]\w*$' })
-}
 $uiActions = [Collections.Generic.List[object]]::new()
-foreach ($match in [regex]::Matches($helpersSource, '(?:ImGui::MenuItem|ImGui::Button|ImGui::SmallButton|\bmenu_item)\s*\(\s*("(?:\\.|[^"\\])*")')) {
-    $label = Convert-CppStrings $match.Groups[1].Value
-    if ($null -ne $label) {
-        $uiActions.Add([ordered]@{ label = $label; line = Get-LineNumber $helpersSource $match.Index })
+if ($effectiveSurfaceMode -eq 'imgui') {
+    $centerMatch = [regex]::Match($globalsSource, '(?s)enum\s+class\s+center_view_t[^\{]*\{([^}]+)\}')
+    $centerViews = @()
+    if ($centerMatch.Success) {
+        $centerViews = @($centerMatch.Groups[1].Value -split ',' | ForEach-Object {
+            ($_ -replace '=.*$', '').Trim()
+        } | Where-Object { $_ -match '^[A-Za-z_]\w*$' })
+    }
+    foreach ($match in [regex]::Matches($helpersSource, '(?:ImGui::MenuItem|ImGui::Button|ImGui::SmallButton|\bmenu_item)\s*\(\s*("(?:\\.|[^"\\])*")')) {
+        $label = Convert-CppStrings $match.Groups[1].Value
+        if ($null -ne $label) {
+            $uiActions.Add([ordered]@{ label = $label; line = Get-LineNumber $helpersSource $match.Index })
+        }
+    }
+} else {
+    $centerTableFiles = @($qtSourceFiles | Where-Object {
+        (Get-Text $_.FullName).IndexOf('k_center_pages', [StringComparison]::Ordinal) -ge 0
+    })
+    if ($centerTableFiles.Count -ne 1) {
+        throw "qt surface mode requires exactly one canonical center-page table 'k_center_pages' under src/standalone/src/qt (shell/chrome contract); found $($centerTableFiles.Count)"
+    }
+    $centerTablePath = $centerTableFiles[0].FullName
+    $centerTableSource = Get-Text $centerTablePath
+    $centerTableMask = Get-CppCodeMask $centerTableSource $centerTablePath
+    $tableMarker = [regex]::Match($centerTableMask, '\bk_center_pages\s*\[\s*\]')
+    if (!$tableMarker.Success) {
+        throw "canonical center-page table 'k_center_pages[]' declaration missing in $(Get-Relative $centerTablePath)"
+    }
+    $tableOpen = $centerTableMask.IndexOf('=', $tableMarker.Index + $tableMarker.Length)
+    $tableBrace = if ($tableOpen -ge 0) { $centerTableMask.IndexOf('{', $tableOpen) } else { -1 }
+    if ($tableBrace -lt 0) {
+        throw "canonical center-page table 'k_center_pages' has no initializer block in $(Get-Relative $centerTablePath)"
+    }
+    $tableClose = Get-MatchingIndex $centerTableMask $tableBrace '{' '}'
+    $tableBody = $centerTableSource.Substring($tableBrace + 1, $tableClose - $tableBrace - 1)
+    $centerViews = @([regex]::Matches($tableBody, '(?:u8|u|U|L)?"(?:\\.|[^"\\])*"') | ForEach-Object {
+        Convert-CppStrings $_.Value
+    } | Where-Object { $_ -match '^[a-z0-9_][a-z0-9._-]*$' } | Sort-Object -Unique)
+    if ($centerViews.Count -eq 0) {
+        throw "canonical center-page table 'k_center_pages' yielded zero string ids in $(Get-Relative $centerTablePath)"
+    }
+    foreach ($qtFile in $qtSourceFiles) {
+        $qtSource = Get-Text $qtFile.FullName
+        if ($qtSource.IndexOf('register_', [StringComparison]::Ordinal) -lt 0 -and
+            $qtSource.IndexOf('addAction', [StringComparison]::Ordinal) -lt 0 -and
+            $qtSource.IndexOf('QKeySequence', [StringComparison]::Ordinal) -lt 0) { continue }
+        $qtMask = Get-CppCodeMask $qtSource $qtFile.FullName
+        if ([regex]::IsMatch($qtSource, '\baddAction\s*\(\s*(?:QString\s*\(\s*|QLatin1String\s*\(\s*|QStringLiteral\s*\(\s*|tr\s*\(\s*)?(?:u8|u|U|L)?"')) {
+            throw "Ad-hoc addAction string literal outside the action registry: $(Get-Relative $qtFile.FullName)"
+        }
+        foreach ($sequenceMatch in [regex]::Matches($qtSource, '\bQKeySequence\s*\(\s*(?:QStringLiteral\s*\(\s*|QLatin1String\s*\(\s*|tr\s*\(\s*)?(?:u8|u|U|L)?"')) {
+            if ($QtShortcutLiteralAllowedFiles -notcontains (Get-Relative $qtFile.FullName)) {
+                throw "Hardcoded QKeySequence literal outside the shortcut-editor defaults file: $(Get-Relative $qtFile.FullName):$(Get-LineNumber $qtSource $sequenceMatch.Index)"
+            }
+        }
+        foreach ($match in [regex]::Matches($qtMask, '\bregister_(?:view|action)\s*\(')) {
+            $open = $match.Index + $match.Value.LastIndexOf('(')
+            $close = Get-MatchingIndex $qtSource $open '(' ')'
+            $arguments = @(Split-TopLevel $qtSource.Substring($open + 1, $close - $open - 1))
+            $literals = @($arguments | ForEach-Object { Convert-CppStrings ([string]$_) } |
+                Where-Object { ![string]::IsNullOrEmpty($_) })
+            if ($literals.Count -lt 2 -or $literals[0] -notmatch '^[a-z0-9_][a-z0-9._-]*$') {
+                throw "Unresolved Qt action registration at $(Get-Relative $qtFile.FullName):$(Get-LineNumber $qtSource $match.Index)"
+            }
+            $uiActions.Add([ordered]@{
+                label = [string]$literals[$literals.Count - 1]
+                line = Get-LineNumber $qtSource $match.Index
+            })
+        }
     }
 }
 foreach ($match in [regex]::Matches($applicationUiRuntimeSource,
@@ -3200,6 +3350,8 @@ $uiActions = @($uiActions | Sort-Object `
     @{ Expression = { [int]$_['line'] } } -Unique)
 $shortcuts = [Collections.Generic.List[object]]::new()
 $shortcutSourceFiles = [Collections.Generic.List[string]]::new()
+$shortcutTokenPrefix = if ($effectiveSurfaceMode -eq 'qt') { 'Qt::Key_' } else { 'ImGuiKey_' }
+$shortcutTokenPattern = if ($effectiveSurfaceMode -eq 'qt') { 'Qt::Key_[A-Za-z0-9_]+' } else { 'ImGuiKey_[A-Za-z0-9_]+' }
 $shortcutRoot = Join-Path $RepositoryRoot 'src\standalone\src'
 $shortcutFiles = @(Get-ChildItem -LiteralPath $shortcutRoot -Recurse -File | Where-Object {
     $_.Extension -in @('.cpp', '.h', '.hpp')
@@ -3207,9 +3359,9 @@ $shortcutFiles = @(Get-ChildItem -LiteralPath $shortcutRoot -Recurse -File | Whe
 foreach ($file in $shortcutFiles) {
     $shortcutSource = Get-Text $file.FullName
     if ([string]::IsNullOrEmpty($shortcutSource)) { continue }
-    if ($shortcutSource.IndexOf('ImGuiKey_', [StringComparison]::Ordinal) -lt 0) { continue }
+    if ($shortcutSource.IndexOf($shortcutTokenPrefix, [StringComparison]::Ordinal) -lt 0) { continue }
     $shortcutMask = Get-CppCodeMask $shortcutSource $file.FullName
-    $matches = [regex]::Matches($shortcutMask, 'ImGuiKey_[A-Za-z0-9_]+')
+    $matches = [regex]::Matches($shortcutMask, $shortcutTokenPattern)
     if ($matches.Count -eq 0) { continue }
     $shortcutSourceFiles.Add($file.FullName)
     foreach ($match in $matches) {
@@ -3500,52 +3652,88 @@ $contractArgs = @{
 }
 $sourceContracts.Add((Get-SourceContractRecord @contractArgs))
 
-$queuedFlagsStart = $mainSource.IndexOf('static constexpr UINT kAidaQueuedPeekFlags',
-    [StringComparison]::Ordinal)
-$queuedFlagsEnd = if ($queuedFlagsStart -ge 0) { $mainSource.IndexOf(';', $queuedFlagsStart) } else { -1 }
-if ($queuedFlagsStart -lt 0 -or $queuedFlagsEnd -lt 0) { throw 'Missing queued message-pump flags' }
-$queuedFlags = $mainSource.Substring($queuedFlagsStart, $queuedFlagsEnd - $queuedFlagsStart + 1)
-Assert-SourceContains $queuedFlags @('PM_REMOVE', 'PM_QS_INPUT', 'PM_QS_POSTMESSAGE',
-    'PM_QS_PAINT', 'PM_QS_SENDMESSAGE') 'queued message-pump flags'
-Assert-SourceExcludes $queuedFlags @('PM_NOREMOVE') 'queued message-pump flags'
-$sendFlagsStart = $mainSource.IndexOf('static constexpr UINT kAidaSendOnlyPeekFlags',
-    [StringComparison]::Ordinal)
-$sendFlagsEnd = if ($sendFlagsStart -ge 0) { $mainSource.IndexOf(';', $sendFlagsStart) } else { -1 }
-if ($sendFlagsStart -lt 0 -or $sendFlagsEnd -lt 0) { throw 'Missing send-only message-pump flags' }
-$sendFlags = $mainSource.Substring($sendFlagsStart, $sendFlagsEnd - $sendFlagsStart + 1)
-Assert-SourceContains $sendFlags @('PM_REMOVE | PM_QS_SENDMESSAGE') 'send-only message-pump flags'
-Assert-SourceExcludes $sendFlags @('PM_NOREMOVE') 'send-only message-pump flags'
-$pumpMarker = 'aida_tracer::mark_render_phase("peek_message_probe")'
-$pumpEndMarker = 'aida_tracer::g_peek_return_count.fetch_add(1, std::memory_order_acq_rel)'
-$pumpStart = $mainSource.IndexOf($pumpMarker, [StringComparison]::Ordinal)
-$pumpEnd = if ($pumpStart -ge 0) {
-    $mainSource.IndexOf($pumpEndMarker, $pumpStart + $pumpMarker.Length,
+if ($effectiveSurfaceMode -eq 'imgui') {
+    $queuedFlagsStart = $mainSource.IndexOf('static constexpr UINT kAidaQueuedPeekFlags',
         [StringComparison]::Ordinal)
-} else { -1 }
-if ($pumpStart -lt 0 -or $pumpEnd -lt 0) { throw 'Missing primary message-pump source range' }
-$pumpScope = $mainSource.Substring($pumpStart, $pumpEnd - $pumpStart + $pumpEndMarker.Length)
-$pumpEvidence = @(
-    'GetQueueStatus(QS_ALLINPUT)',
-    'if (queue_current == 0)',
-    'send_message_pending',
-    'if (send_only_pending)',
-    'PeekMessage(&sent_probe, nullptr, 0U, 0U, kAidaSendOnlyPeekFlags)',
-    'const UINT peek_remove_flags = kAidaQueuedPeekFlags',
-    'PeekMessage(&msg, peek_filter, 0U, 0U, peek_remove_flags)'
-)
-Assert-SourceOrdered $pumpScope $pumpEvidence 'primary message-pump invariant sequence'
-$emptyQueueBlock = Get-SourceBlock $mainSource 'if (queue_current == 0)' 'empty-queue PeekMessage probe'
-Assert-SourceExcludes $emptyQueueBlock.text @('break;', 'continue;', 'return') 'empty-queue PeekMessage probe'
-$sourceContracts.Add([ordered]@{
-    id = 'win32_message_pump_invariants'
-    source = [ordered]@{
-        file = Get-Relative $mainPath
-        line = Get-LineNumber $mainSource $pumpStart
-        symbol = 'primary Win32 message pump'
+    $queuedFlagsEnd = if ($queuedFlagsStart -ge 0) { $mainSource.IndexOf(';', $queuedFlagsStart) } else { -1 }
+    if ($queuedFlagsStart -lt 0 -or $queuedFlagsEnd -lt 0) { throw 'Missing queued message-pump flags' }
+    $queuedFlags = $mainSource.Substring($queuedFlagsStart, $queuedFlagsEnd - $queuedFlagsStart + 1)
+    Assert-SourceContains $queuedFlags @('PM_REMOVE', 'PM_QS_INPUT', 'PM_QS_POSTMESSAGE',
+        'PM_QS_PAINT', 'PM_QS_SENDMESSAGE') 'queued message-pump flags'
+    Assert-SourceExcludes $queuedFlags @('PM_NOREMOVE') 'queued message-pump flags'
+    $sendFlagsStart = $mainSource.IndexOf('static constexpr UINT kAidaSendOnlyPeekFlags',
+        [StringComparison]::Ordinal)
+    $sendFlagsEnd = if ($sendFlagsStart -ge 0) { $mainSource.IndexOf(';', $sendFlagsStart) } else { -1 }
+    if ($sendFlagsStart -lt 0 -or $sendFlagsEnd -lt 0) { throw 'Missing send-only message-pump flags' }
+    $sendFlags = $mainSource.Substring($sendFlagsStart, $sendFlagsEnd - $sendFlagsStart + 1)
+    Assert-SourceContains $sendFlags @('PM_REMOVE | PM_QS_SENDMESSAGE') 'send-only message-pump flags'
+    Assert-SourceExcludes $sendFlags @('PM_NOREMOVE') 'send-only message-pump flags'
+    $pumpMarker = 'aida_tracer::mark_render_phase("peek_message_probe")'
+    $pumpEndMarker = 'aida_tracer::g_peek_return_count.fetch_add(1, std::memory_order_acq_rel)'
+    $pumpStart = $mainSource.IndexOf($pumpMarker, [StringComparison]::Ordinal)
+    $pumpEnd = if ($pumpStart -ge 0) {
+        $mainSource.IndexOf($pumpEndMarker, $pumpStart + $pumpMarker.Length,
+            [StringComparison]::Ordinal)
+    } else { -1 }
+    if ($pumpStart -lt 0 -or $pumpEnd -lt 0) { throw 'Missing primary message-pump source range' }
+    $pumpScope = $mainSource.Substring($pumpStart, $pumpEnd - $pumpStart + $pumpEndMarker.Length)
+    $pumpEvidence = @(
+        'GetQueueStatus(QS_ALLINPUT)',
+        'if (queue_current == 0)',
+        'send_message_pending',
+        'if (send_only_pending)',
+        'PeekMessage(&sent_probe, nullptr, 0U, 0U, kAidaSendOnlyPeekFlags)',
+        'const UINT peek_remove_flags = kAidaQueuedPeekFlags',
+        'PeekMessage(&msg, peek_filter, 0U, 0U, peek_remove_flags)'
+    )
+    Assert-SourceOrdered $pumpScope $pumpEvidence 'primary message-pump invariant sequence'
+    $emptyQueueBlock = Get-SourceBlock $mainSource 'if (queue_current == 0)' 'empty-queue PeekMessage probe'
+    Assert-SourceExcludes $emptyQueueBlock.text @('break;', 'continue;', 'return') 'empty-queue PeekMessage probe'
+    $sourceContracts.Add([ordered]@{
+        id = 'win32_message_pump_invariants'
+        source = [ordered]@{
+            file = Get-Relative $mainPath
+            line = Get-LineNumber $mainSource $pumpStart
+            symbol = 'primary Win32 message pump'
+        }
+        evidence = @($pumpEvidence)
+        forbidden = @('PM_NOREMOVE', 'empty-queue break', 'empty-queue continue', 'empty-queue return')
+    })
+} else {
+    $qtMainPath = Join-Path $RepositoryRoot ($QtMainRelativePath -replace '/', '\')
+    if (!(Test-Path -LiteralPath $qtMainPath -PathType Leaf)) {
+        throw "qt surface mode requires the Qt main TU at $QtMainRelativePath (qt_eventloop_invariants anchor, shell wave contract)"
     }
-    evidence = @($pumpEvidence)
-    forbidden = @('PM_NOREMOVE', 'empty-queue break', 'empty-queue continue', 'empty-queue return')
-})
+    $qtMainSource = Get-Text $qtMainPath
+    $qtOrderedEvidence = @(
+        'QApplication',
+        'setQuitOnLastWindowClosed(false)',
+        'mark_ready',
+        'winId',
+        'aida_hotkey_monitor'
+    )
+    Assert-SourceOrdered $qtMainSource $qtOrderedEvidence 'qt_eventloop_invariants'
+    $qtPresenceEvidence = @(
+        'mark_window_destroying',
+        'aboutToBlock',
+        'QAbstractNativeEventFilter',
+        'closeEvent'
+    )
+    Assert-SourceContains $qtMainSource $qtPresenceEvidence 'qt_eventloop_invariants'
+    $qtForbiddenEvidence = @('PM_QS_SENDMESSAGE', 'kAidaQueuedPeekFlags', 'GetQueueStatus(QS_ALLINPUT)')
+    Assert-SourceExcludes $qtMainSource $qtForbiddenEvidence 'qt_eventloop_invariants'
+    $qtMarkerIndex = $qtMainSource.IndexOf('QApplication', [StringComparison]::Ordinal)
+    $sourceContracts.Add([ordered]@{
+        id = 'qt_eventloop_invariants'
+        source = [ordered]@{
+            file = Get-Relative $qtMainPath
+            line = Get-LineNumber $qtMainSource $qtMarkerIndex
+            symbol = 'Qt event-loop invariants'
+        }
+        evidence = @($qtOrderedEvidence + $qtPresenceEvidence)
+        forbidden = @($qtForbiddenEvidence)
+    })
+}
 
 $hexCallInventory = Get-HexContextCallInventory (Join-Path $RepositoryRoot 'src\standalone\src')
 $sourceContractManifest = [ordered]@{
@@ -3698,11 +3886,13 @@ function Assert-ParameterCompatibility([object[]]$Reference, [object[]]$Candidat
 }
 
 function Assert-StringSurfaceSubset([object[]]$Reference, [object[]]$Candidate,
-                                    [string]$Contract) {
+                                    [string]$Contract, [string]$RetirementKind = '') {
     $candidateSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($value in @($Candidate)) { [void]$candidateSet.Add([string]$value) }
     foreach ($value in @($Reference)) {
         if (!$candidateSet.Contains([string]$value)) {
+            if (![string]::IsNullOrEmpty($RetirementKind) -and
+                (Test-SurfaceRetirement $RetirementKind ([string]$value))) { continue }
             throw "Removed or renamed $Contract '$value'"
         }
     }
@@ -3763,6 +3953,7 @@ function Assert-SurfaceCompatibility([object]$Reference, [object]$Candidate,
     }
     foreach ($name in $referenceTools.Keys) {
         if (!$candidateTools.ContainsKey($name)) {
+            if (Test-SurfaceRetirement 'mcp_registration' $name) { continue }
             throw "Removed or renamed MCP registration '$name' relative to $ReferenceLabel"
         }
         $before = $referenceTools[$name]
@@ -3880,13 +4071,13 @@ function Assert-SurfaceCompatibility([object]$Reference, [object]$Candidate,
 
     $referenceUi = Get-ObjectField $Reference 'ui'
     $candidateUi = Get-ObjectField $Candidate 'ui'
-    Assert-StringSurfaceSubset @((Get-ObjectField $referenceUi 'center_views')) @((Get-ObjectField $candidateUi 'center_views')) 'center view'
+    Assert-StringSurfaceSubset @((Get-ObjectField $referenceUi 'center_views')) @((Get-ObjectField $candidateUi 'center_views')) 'center view' 'center_view'
     $candidateActionLabels = @((Get-ObjectField $candidateUi 'actions') | ForEach-Object {
         [string](Get-ObjectField $_ 'label')
     })
     Assert-StringSurfaceSubset @((Get-ObjectField $referenceUi 'actions') | ForEach-Object {
         [string](Get-ObjectField $_ 'label')
-    }) $candidateActionLabels 'UI action'
+    }) $candidateActionLabels 'UI action' 'ui_action'
     $candidateShortcutKeys = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($entry in @((Get-ObjectField $candidateUi 'shortcuts'))) {
         [void]$candidateShortcutKeys.Add([string](Get-ObjectField $entry 'key'))
@@ -3894,6 +4085,7 @@ function Assert-SurfaceCompatibility([object]$Reference, [object]$Candidate,
     foreach ($entry in @((Get-ObjectField $referenceUi 'shortcuts'))) {
         $key = [string](Get-ObjectField $entry 'key')
         if (!$candidateShortcutKeys.Contains($key)) {
+            if (Test-SurfaceRetirement 'ui_shortcut_key' $key) { continue }
             throw "Removed UI shortcut key relative to ${ReferenceLabel}: $key"
         }
     }
@@ -3915,9 +4107,14 @@ function Assert-SurfaceCompatibility([object]$Reference, [object]$Candidate,
     Assert-StringSurfaceSubset @((Get-ObjectField $referenceSession 'public_method_names')) @((Get-ObjectField $candidateSession 'public_method_names')) 'session public method'
 
     if (Test-ObjectField $Reference 'surface_guard') {
-        if (!(Test-ObjectField $Candidate 'surface_guard') -or
-            [string](Get-ObjectField (Get-ObjectField $Reference 'surface_guard') 'policy') -ne
-            [string](Get-ObjectField (Get-ObjectField $Candidate 'surface_guard') 'policy')) {
+        $referenceGuard = Get-ObjectField $Reference 'surface_guard'
+        $referencePolicy = [string](Get-ObjectField $referenceGuard 'policy')
+        $candidatePolicy = if (Test-ObjectField $Candidate 'surface_guard') {
+            [string](Get-ObjectField (Get-ObjectField $Candidate 'surface_guard') 'policy')
+        } else { '' }
+        $policyCompatible = ($candidatePolicy -eq $referencePolicy) -or
+            ($referencePolicy -eq 'strict_additive_v1' -and $candidatePolicy -eq 'strict_additive_v2_qt')
+        if (!$policyCompatible) {
             throw "Surface guard policy regressed relative to $ReferenceLabel"
         }
     }
@@ -3929,6 +4126,7 @@ function Assert-SurfaceCompatibility([object]$Reference, [object]$Candidate,
         $candidateContracts = Get-NamedSurfaceIndex @((Get-ObjectField (Get-ObjectField $Candidate 'source_contracts') 'contracts')) 'id' 'generated source contracts'
         foreach ($id in $referenceContracts.Keys) {
             if (!$candidateContracts.ContainsKey($id)) {
+                if (Test-SurfaceRetirement 'source_contract' $id) { continue }
                 throw "Removed or renamed source contract '$id' relative to $ReferenceLabel"
             }
         }
@@ -3981,7 +4179,15 @@ function Assert-SurfaceCompatibility([object]$Reference, [object]$Candidate,
             ForEach-Object { [string]$_.category + "`n" + [string]$_.name })
         $candidateFeatures = @((Get-ObjectField (Get-ObjectField $candidatePublic 'test_lab') 'features') |
             ForEach-Object { [string]$_.category + "`n" + [string]$_.name })
-        Assert-StringSurfaceSubset $referenceFeatures $candidateFeatures 'Test Lab feature'
+        $candidateFeatureSet = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
+        foreach ($candidateFeature in $candidateFeatures) { [void]$candidateFeatureSet.Add($candidateFeature) }
+        foreach ($referenceFeature in $referenceFeatures) {
+            if ($candidateFeatureSet.Contains($referenceFeature)) { continue }
+            $featureParts = $referenceFeature -split "`n", 2
+            $featureId = $featureParts[0] + '/' + $featureParts[1]
+            if (Test-SurfaceRetirement 'test_lab_feature' $featureId) { continue }
+            throw "Removed or renamed Test Lab feature '$featureId'"
+        }
         Assert-StringSetEqual @((Get-ObjectField (Get-ObjectField $referencePublic 'workbench') 'analysis_document_kinds')) `
             @((Get-ObjectField (Get-ObjectField $candidatePublic 'workbench') 'analysis_document_kinds')) `
             'workbench analysis document kinds'
@@ -4019,11 +4225,12 @@ function Write-AtomicUtf8([string]$Path, [string]$Content) {
 }
 
 $manifest = [ordered]@{
-    schema_version = 2
+    schema_version = 3
     generator = 'src/standalone/tests/analysis_workspace/generate_surface_manifest.ps1'
     surface_guard = [ordered]@{
-        policy = 'strict_additive_v1'
+        policy = 'strict_additive_v2_qt'
         baseline = Get-Relative $BaselinePath
+        retirements = $retirementEvidence
         protected_mcp_fields = @('name', 'description', 'parameters', 'input_schema',
             'read_only', 'visibility_declared', 'visibility_effective', 'workspace_aware',
             'production_reachability')
@@ -4107,6 +4314,8 @@ finally { $hasher.Dispose() }
 [ordered]@{
     output = (Resolve-Path $OutputPath).Path
     sha256 = $outputHash
+    surface_mode = $effectiveSurfaceMode
+    retirements_recorded = $retirementEvidence.Count
     registration_count = $registrations.Count
     unique_name_count = @($registrations.name | Sort-Object -Unique).Count
     resolved_dynamic_templates = $resolvedHelperRecords.Count

@@ -2,45 +2,6 @@
 
 #include "../../helpers/diag_log.hpp"
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-
-namespace aida::analysis {
-
-void workspace_registry_t::bind_preview_workspace(
-    std::shared_ptr<analysis_workspace_t> workspace) {
-    if (!workspace)
-        return;
-    std::unique_lock lock(mutex_);
-    const auto id = workspace->identity().binary_id();
-    workspaces_[id] = std::move(workspace);
-    ui_selection_ = id;
-}
-
-void workspace_registry_t::clear_preview_workspaces() {
-    std::unique_lock lock(mutex_);
-    ui_selection_.reset();
-    pe_coff_metadata_.clear();
-    workspaces_.clear();
-}
-
-std::shared_ptr<analysis_workspace_t> workspace_registry_t::selected_for_ui() const {
-    std::shared_lock lock(mutex_);
-    if (!ui_selection_)
-        return {};
-    const auto iterator = workspaces_.find(*ui_selection_);
-    if (iterator == workspaces_.end() || iterator->second->closing() || iterator->second->closed())
-        return {};
-    return iterator->second;
-}
-
-workspace_registry_t& workspace_registry() {
-    static workspace_registry_t registry;
-    return registry;
-}
-
-}
-
-#else
 
 #include "workspace_identity.hpp"
 #include "decompiler_service.hpp"
@@ -2015,4 +1976,3 @@ workspace_registry_t& workspace_registry() {
 
 }
 
-#endif

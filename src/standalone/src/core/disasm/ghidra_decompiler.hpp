@@ -433,29 +433,6 @@ inline size_t count_required_specs_files(const std::string& dir)
 	return count;
 }
 
-inline size_t ghidra_spec_resource_count(size_t& total_bytes)
-{
-	total_bytes = 0;
-	const int ids[] = {
-		IDR_GHIDRA_SLA,
-		IDR_GHIDRA_PSPEC,
-		IDR_GHIDRA_CSPEC,
-		IDR_GHIDRA_LDEFS
-	};
-	size_t count = 0;
-	for (int id : ids) {
-		HRSRC res = FindResourceW(nullptr, MAKEINTRESOURCEW(id), RT_RCDATA);
-		if (!res)
-			continue;
-		DWORD size = SizeofResource(nullptr, res);
-		if (size == 0)
-			continue;
-		++count;
-		total_bytes += static_cast<size_t>(size);
-	}
-	return count;
-}
-
 inline void append_specs_root_candidates(std::vector<std::pair<std::string, std::string>>& out,
                                          const std::string& label,
                                          const std::string& root)
@@ -1412,7 +1389,7 @@ inline bool init(const std::string& specs_dir = "") {
 	size_t embedded_resource_bytes = 0;
 	size_t embedded_resource_count = 0;
 	if (dir.empty()) {
-		embedded_resource_count = detail::ghidra_spec_resource_count(embedded_resource_bytes);
+		embedded_resource_count = embedded_resources::ghidra_spec_resource_count(embedded_resource_bytes);
 		diag::log_tagged_critical_fmt("dec",
 			"ghidra_init_pre_extract_specs target=temp embedded_resources=%zu/4 embedded_resource_bytes=%zu",
 			embedded_resource_count,

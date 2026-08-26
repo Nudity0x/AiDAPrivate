@@ -1,20 +1,12 @@
 #pragma once
 
-#include "../helpers/globals.h"
-#include "theme.hpp"
-#include "motion.hpp"
-#include "clock.hpp"
-#include "blur_layer.hpp"
-#include "fonts.hpp"
 #include <string>
 #include <vector>
 #include <mutex>
-#include <algorithm>
 #include <functional>
 #include <cstdint>
 #include <cstddef>
-#include <cmath>
-#include <array>
+#include <utility>
 
 namespace toast_notification
 {
@@ -65,164 +57,52 @@ namespace toast_notification
 
     inline constexpr std::size_t MAX_VISIBLE = 5;
     inline constexpr float DEDUP_WINDOW      = 3.0f;
-    inline constexpr float TOAST_WIDTH       = 380.0f;
-    inline constexpr float TOAST_HEIGHT      = 56.0f;
-    inline constexpr float PADDING           = 14.0f;
-    inline constexpr float GAP               = 10.0f;
-    inline constexpr float SIDE_MARGIN       = 24.0f;
-    inline constexpr float BOTTOM_MARGIN     = 30.0f;
-    inline constexpr float SLIDE_DURATION    = 0.32f;
-    inline constexpr float FADE_OUT_TAIL     = 0.32f;
-    inline constexpr float TOAST_ROUNDING    = 14.0f;
-    inline constexpr float ICON_SIZE         = 14.0f;
-    inline constexpr float ICON_BOX          = 28.0f;
-    inline constexpr float SWIPE_DISMISS_PX  = 100.0f;
-    inline constexpr float SWIPE_DISMISS_PCT = 0.30f;
-    inline constexpr float HOVER_TIMER_SCALE = 0.18f;
 
     namespace detail
     {
         inline std::mutex            s_mtx;
         inline std::vector<toast_t>  s_toasts;
         inline std::uint64_t         s_next_id = 1;
+    }
 
-        inline ImU32 severity_color(toast_type_t k)
+    using qt_forward_fn_t = std::function<void(const std::string& message, toast_type_t type,
+        float duration, std::string action_label, std::function<void()> on_click)>;
+
+    namespace detail
+    {
+        struct qt_forward_hook_t
         {
-            const auto& th = aida::ui::resolved();
-            switch (k) {
-                case toast_type_t::success: return th.success;
-                case toast_type_t::warning: return th.warning;
-                case toast_type_t::error:   return th.error;
-                case toast_type_t::info:    return th.info;
+            std::mutex mtx;
+            qt_forward_fn_t fn;
+        };
+
+        inline qt_forward_hook_t& qt_forward_hook()
+        {
+            static qt_forward_hook_t hook;
+            return hook;
+        }
+
+        inline bool forward_to_qt(const std::string& message, toast_type_t type, float duration,
+            std::string action_label, std::function<void()> on_click)
+        {
+            qt_forward_fn_t forward;
+            {
+                auto& hook = qt_forward_hook();
+                std::lock_guard<std::mutex> lk(hook.mtx);
+                forward = hook.fn;
             }
-            return th.info;
+            if (!forward)
+                return false;
+            forward(message, type, duration, std::move(action_label), std::move(on_click));
+            return true;
         }
+    }
 
-        inline ImU32 severity_soft(toast_type_t k)
-        {
-            const auto& th = aida::ui::resolved();
-            switch (k) {
-                case toast_type_t::success: return th.success_soft;
-                case toast_type_t::warning: return th.warning_soft;
-                case toast_type_t::error:   return th.error_soft;
-                case toast_type_t::info:    return th.info_soft;
-            }
-            return th.info_soft;
-        }
-
-        inline float severity_wash_alpha(toast_type_t k, bool is_dark)
-        {
-            if (k == toast_type_t::info)
-                return is_dark ? 0.24f : 0.16f;
-            return is_dark ? 0.42f : 0.30f;
-        }
-
-        inline ImU32 multiply_alpha(ImU32 c, float a)
-        {
-            if (a < 0.0f) a = 0.0f;
-            if (a > 1.0f) a = 1.0f;
-            float aa = static_cast<float>((c >> IM_COL32_A_SHIFT) & 0xFFu) * a;
-            ImU32 mask = (0xFFu << IM_COL32_A_SHIFT);
-            ImU32 new_a = static_cast<ImU32>(aa);
-            return (c & ~mask) | (new_a << IM_COL32_A_SHIFT);
-        }
-
-        inline void draw_check(ImDrawList* dl, ImVec2 c, float s, ImU32 col, float thickness)
-        {
-            float h = s * 0.5f;
-            ImVec2 p0(c.x - h * 0.85f,  c.y + h * 0.05f);
-            ImVec2 p1(c.x - h * 0.15f,  c.y + h * 0.55f);
-            ImVec2 p2(c.x + h * 0.95f,  c.y - h * 0.55f);
-            dl->PathLineTo(p0);
-            dl->PathLineTo(p1);
-            dl->PathLineTo(p2);
-            dl->PathStroke(col, 0, thickness);
-        }
-
-        inline void draw_warning(ImDrawList* dl, ImVec2 c, float s, ImU32 col, ImU32 fill_col, float thickness)
-        {
-            float h = s * 0.5f;
-            ImVec2 a(c.x,             c.y - h * 0.92f);
-            ImVec2 b(c.x + h * 0.95f, c.y + h * 0.70f);
-            ImVec2 d(c.x - h * 0.95f, c.y + h * 0.70f);
-            dl->PathLineTo(a);
-            dl->PathLineTo(b);
-            dl->PathLineTo(d);
-            dl->PathFillConvex(fill_col);
-
-            dl->PathLineTo(a);
-            dl->PathLineTo(b);
-            dl->PathLineTo(d);
-            dl->PathLineTo(a);
-            dl->PathStroke(col, 0, thickness);
-
-            float bar_top = c.y - h * 0.30f;
-            float bar_bot = c.y + h * 0.20f;
-            dl->AddLine(ImVec2(c.x, bar_top), ImVec2(c.x, bar_bot), col, thickness);
-            dl->AddCircleFilled(ImVec2(c.x, c.y + h * 0.45f), thickness * 0.85f, col, 8);
-        }
-
-        inline void draw_error(ImDrawList* dl, ImVec2 c, float s, ImU32 col, ImU32 fill_col, float thickness)
-        {
-            float r = s * 0.55f;
-            dl->AddCircleFilled(c, r, fill_col, 28);
-            dl->AddCircle(c, r, col, 28, thickness);
-            float k = r * 0.42f;
-            dl->AddLine(ImVec2(c.x - k, c.y - k), ImVec2(c.x + k, c.y + k), col, thickness);
-            dl->AddLine(ImVec2(c.x - k, c.y + k), ImVec2(c.x + k, c.y - k), col, thickness);
-        }
-
-        inline void draw_info(ImDrawList* dl, ImVec2 c, float s, ImU32 col, ImU32 fill_col, float thickness)
-        {
-            float r = s * 0.55f;
-            dl->AddCircleFilled(c, r, fill_col, 28);
-            dl->AddCircle(c, r, col, 28, thickness);
-            float dot_r = thickness * 0.95f;
-            dl->AddCircleFilled(ImVec2(c.x, c.y - r * 0.40f), dot_r, col, 10);
-            dl->AddLine(ImVec2(c.x, c.y - r * 0.05f), ImVec2(c.x, c.y + r * 0.45f), col, thickness);
-        }
-
-        inline void draw_severity_icon(ImDrawList* dl, ImVec2 center, toast_type_t k,
-                                        ImU32 color, ImU32 fill, float alpha, float scale)
-        {
-            ImU32 c   = multiply_alpha(color, alpha);
-            ImU32 f   = multiply_alpha(fill, alpha);
-            float th  = 1.7f * scale;
-            const float icon_size = ICON_SIZE * scale;
-            switch (k) {
-                case toast_type_t::success: draw_check(dl, center, icon_size, c, th); break;
-                case toast_type_t::warning: draw_warning(dl, center, icon_size + scale, c, f, th); break;
-                case toast_type_t::error:   draw_error(dl, center, icon_size, c, f, th); break;
-                case toast_type_t::info:    draw_info(dl, center, icon_size, c, f, th); break;
-            }
-        }
-
-        inline void draw_progress_ring(ImDrawList* dl, ImVec2 center, float radius,
-                                         float thickness, float progress, ImU32 color, float alpha)
-        {
-            if (progress < 0.0f) progress = 0.0f;
-            if (progress > 1.0f) progress = 1.0f;
-            ImU32 track = multiply_alpha(color, alpha * 0.18f);
-            dl->AddCircle(center, radius, track, 64, thickness);
-            if (progress > 0.0001f) {
-                float a0 = -1.5707963f;
-                float a1 = a0 + progress * 6.2831853f;
-                int seg_count = 64;
-                int steps = static_cast<int>(static_cast<float>(seg_count) * progress);
-                if (steps < 2) steps = 2;
-                dl->PathArcTo(center, radius, a0, a1, steps);
-                dl->PathStroke(multiply_alpha(color, alpha), 0, thickness);
-            }
-        }
-
-        inline float compute_toast_height(const toast_t& t, ImFont* font, float font_size,
-                                          float text_wrap_w, float scale)
-        {
-            ImVec2 ts = font->CalcTextSizeA(font_size, FLT_MAX, text_wrap_w, t.message.c_str());
-            float content_h = ts.y + PADDING * scale * 2.0f;
-            float min_h = TOAST_HEIGHT * scale;
-            return content_h > min_h ? content_h : min_h;
-        }
+    inline void install_qt_forward(qt_forward_fn_t forward)
+    {
+        auto& hook = detail::qt_forward_hook();
+        std::lock_guard<std::mutex> lk(hook.mtx);
+        hook.fn = std::move(forward);
     }
 
     inline void push(const std::string& message,
@@ -230,6 +110,9 @@ namespace toast_notification
                      float duration = 4.0f)
     {
         if (message.empty())
+            return;
+
+        if (detail::forward_to_qt(message, type, duration, std::string{}, nullptr))
             return;
 
         std::lock_guard<std::mutex> lk(detail::s_mtx);
@@ -260,6 +143,10 @@ namespace toast_notification
         if (message.empty())
             return;
 
+        if (detail::forward_to_qt(message, type, duration, std::move(action.label),
+                std::move(action.on_click)))
+            return;
+
         std::lock_guard<std::mutex> lk(detail::s_mtx);
 
         for (const auto& t : detail::s_toasts) {
@@ -282,413 +169,4 @@ namespace toast_notification
         }
     }
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    inline void clear_preview_state()
-    {
-        std::lock_guard<std::mutex> lk(detail::s_mtx);
-        detail::s_toasts.clear();
-        detail::s_next_id = 1;
-    }
-#endif
-
-    inline void render()
-    {
-        std::array<std::function<void()>, MAX_VISIBLE * 2> deferred_callbacks;
-        std::size_t deferred_callback_count = 0;
-        std::vector<toast_t> active_toasts;
-        {
-            std::lock_guard<std::mutex> lk(detail::s_mtx);
-            if (detail::s_toasts.empty())
-                return;
-            active_toasts.swap(detail::s_toasts);
-        }
-
-        ImGuiIO& io = ImGui::GetIO();
-        float dt = io.DeltaTime;
-        if (dt < 0.0f) dt = 0.0f;
-        if (dt > 0.05f) dt = 0.05f;
-
-        const ImVec2 display = io.DisplaySize;
-        ImDrawList* dl = ImGui::GetForegroundDrawList();
-        const float ui_scale = (std::clamp)(globals::ui::dpi_scale, 0.75f, 2.5f);
-        const float side_margin = SIDE_MARGIN * ui_scale;
-        const float bottom_margin = BOTTOM_MARGIN * ui_scale;
-        const float padding = PADDING * ui_scale;
-        const float gap = GAP * ui_scale;
-        const float icon_box = ICON_BOX * ui_scale;
-        const float rounding = TOAST_ROUNDING * ui_scale;
-        const float toast_width = (std::min)(TOAST_WIDTH * ui_scale,
-            (std::max)(1.0f, display.x - side_margin * 2.0f));
-
-        ImFont* font_msg    = aida::ui::fonts::body_em();
-        ImFont* font_action = aida::ui::fonts::caption();
-        if (!font_msg)    font_msg    = ImGui::GetFont();
-        if (!font_action) font_action = ImGui::GetFont();
-        const float font_size_msg    = aida::ui::fonts::size_or(font_msg, ImGui::GetFontSize());
-        const float font_size_action = aida::ui::fonts::size_or(font_action, ImGui::GetFontSize());
-
-        const auto& th = aida::ui::resolved();
-        const ImU32 text_primary   = th.text_primary;
-        const ImU32 text_secondary = th.text_secondary;
-
-        const ImVec2 mouse = io.MousePos;
-        const bool mouse_down = ImGui::IsMouseDown(0);
-        const bool mouse_clicked = ImGui::IsMouseClicked(0);
-        const bool mouse_released = ImGui::IsMouseReleased(0);
-
-        std::size_t visible_index = 0;
-        std::array<float, MAX_VISIBLE * 2> stack_target_y{};
-        std::array<float, MAX_VISIBLE * 2> stack_height{};
-        std::size_t stack_count = 0;
-
-        auto compute_action_btn_w = [&](const toast_t& t) -> float {
-            if (!t.has_action) return 0.0f;
-            ImVec2 lbl_size = font_action->CalcTextSizeA(font_size_action, FLT_MAX, 0.0f, t.action.label.c_str());
-            return lbl_size.x + 26.0f * ui_scale;
-        };
-
-        for (auto it = active_toasts.rbegin(); it != active_toasts.rend(); ++it) {
-            if (stack_count >= stack_target_y.size()) break;
-            auto& t = *it;
-            if (t.dismissing && t.fade_out <= 0.001f) {
-                stack_target_y[stack_count] = 0.0f;
-                stack_height[stack_count++] = 0.0f;
-                continue;
-            }
-
-            float btn_reserve = compute_action_btn_w(t);
-            float content_w = toast_width - padding * 2.0f - icon_box - 8.0f * ui_scale - btn_reserve;
-            if (content_w < 1.0f) content_w = 1.0f;
-
-            float h = detail::compute_toast_height(t, font_msg, font_size_msg, content_w, ui_scale);
-            stack_height[stack_count] = h;
-
-            if (visible_index >= MAX_VISIBLE) {
-                stack_target_y[stack_count++] = display.y;
-                continue;
-            }
-
-            float ty = display.y - bottom_margin - h;
-            for (std::size_t p = 0; p < visible_index; ++p) {
-                const std::size_t stack_offset = p + 2;
-                if (stack_offset > stack_count + 1) break;
-                const std::size_t idx_above = stack_count + 1 - stack_offset;
-                ty -= stack_height[idx_above] + gap;
-            }
-            stack_target_y[stack_count++] = ty;
-            ++visible_index;
-        }
-
-        for (std::size_t i = 0; i < active_toasts.size(); ++i) {
-            auto& t = active_toasts[i];
-            const bool reduced_motion = aida::ui::reduced_motion_enabled();
-
-            std::size_t reverse_i = active_toasts.size() - 1 - i;
-            float target_y = stack_target_y[reverse_i];
-            float h = stack_height[reverse_i];
-
-            float btn_reserve_render = compute_action_btn_w(t);
-            float wrap_w = toast_width - padding * 2.0f - icon_box - 8.0f * ui_scale - btn_reserve_render;
-            if (wrap_w < 1.0f) wrap_w = 1.0f;
-
-            float resting_x = display.x - side_margin - toast_width;
-
-            if (!t.initialized_position) {
-                t.current_x = reduced_motion ? resting_x : display.x + 12.0f;
-                t.current_y = target_y;
-                t.target_x = resting_x;
-                t.target_y = target_y;
-                t.velocity_x = 0.0f;
-                t.velocity_y = 0.0f;
-                t.initialized_position = true;
-            }
-
-            t.target_y = target_y;
-
-            if (!t.dismissing && !t.swipe_dismissing) {
-                if (reduced_motion) {
-                    t.intro_progress = 1.0f;
-                } else if (t.intro_progress < 1.0f) {
-                    t.intro_progress += dt / SLIDE_DURATION;
-                    if (t.intro_progress > 1.0f) t.intro_progress = 1.0f;
-                }
-                t.target_x = resting_x;
-            }
-
-            ImVec2 toast_tl_pre(t.current_x, t.current_y);
-            ImVec2 toast_br_pre(t.current_x + toast_width, t.current_y + h);
-            bool is_hovered = !t.dismissing && !t.swipe_dismissing &&
-                              mouse.x >= toast_tl_pre.x && mouse.x <= toast_br_pre.x &&
-                              mouse.y >= toast_tl_pre.y && mouse.y <= toast_br_pre.y;
-
-            float hover_target = is_hovered ? 1.0f : 0.0f;
-            t.hover_amount = reduced_motion ? hover_target :
-                aida::motion::spring_step(t.hover_amount, hover_target,
-                    t.hover_velocity, aida::motion::spring::balanced, dt);
-            if (t.hover_amount < 0.0f) t.hover_amount = 0.0f;
-            if (t.hover_amount > 1.0f) t.hover_amount = 1.0f;
-
-            bool click_completed = false;
-            if (!t.dismissing && !t.swipe_dismissing) {
-                if (mouse_clicked && is_hovered) {
-                    t.press_started_inside = true;
-                }
-                if (mouse_released) {
-                    if (t.drag_owned && t.was_dragging) {
-                        float threshold_px  = SWIPE_DISMISS_PX * ui_scale;
-                        float threshold_pct = toast_width * SWIPE_DISMISS_PCT;
-                        float effective = threshold_px < threshold_pct ? threshold_px : threshold_pct;
-                        if (t.swipe_offset > effective) {
-                            t.swipe_dismissing = true;
-                            t.swipe_velocity = 1400.0f;
-                            if (t.swipe_offset > 30.0f)
-                                t.swipe_velocity = t.swipe_offset * 6.0f + 600.0f;
-                        } else {
-                            t.swipe_offset = 0.0f;
-                        }
-                    }
-                    else if (t.press_started_inside && is_hovered && !t.drag_owned) {
-                        click_completed = true;
-                    }
-                    t.was_dragging = false;
-                    t.drag_owned = false;
-                    t.press_started_inside = false;
-                }
-                else if (!mouse_down) {
-                    t.was_dragging = false;
-                    t.drag_owned = false;
-                    t.press_started_inside = false;
-                    t.swipe_offset = 0.0f;
-                }
-                else if (t.press_started_inside && ImGui::IsMouseDragging(0, 4.0f)) {
-                    ImVec2 dd = ImGui::GetMouseDragDelta(0, 4.0f);
-                    if (!t.drag_owned) {
-                        if (dd.x > 0.0f && dd.x > std::fabs(dd.y)) {
-                            t.drag_owned = true;
-                        }
-                    }
-                    if (t.drag_owned) {
-                        float drag_dx = dd.x;
-                        if (drag_dx < 0.0f) drag_dx = 0.0f;
-                        t.was_dragging = true;
-                        t.swipe_offset = drag_dx;
-                    }
-                }
-            }
-
-            float timer_scale = 1.0f;
-            if (is_hovered || t.was_dragging) timer_scale = HOVER_TIMER_SCALE;
-            if (!t.dismissing && !t.swipe_dismissing)
-                t.elapsed += dt * timer_scale;
-
-            float remaining = t.duration - t.elapsed;
-
-            if (!t.dismissing && !t.swipe_dismissing && remaining <= 0.0f) {
-                t.dismissing = true;
-            }
-
-            if (t.swipe_dismissing) {
-                t.swipe_offset += t.swipe_velocity * dt;
-                t.swipe_velocity += 1200.0f * dt;
-                t.dismiss_alpha_decay -= dt / FADE_OUT_TAIL;
-                if (t.dismiss_alpha_decay < 0.0f) t.dismiss_alpha_decay = 0.0f;
-                if (t.swipe_offset > display.x || t.dismiss_alpha_decay <= 0.001f) {
-                    t.fade_out = 0.0f;
-                    t.dismissing = true;
-                }
-            }
-            else if (t.dismissing) {
-                t.fade_out = reduced_motion ? 0.0f : t.fade_out - dt / FADE_OUT_TAIL;
-                if (t.fade_out < 0.0f) t.fade_out = 0.0f;
-            }
-
-            if (!t.swipe_dismissing) {
-                t.current_x = reduced_motion ? t.target_x :
-                    aida::motion::spring_step(t.current_x, t.target_x,
-                        t.velocity_x, aida::motion::spring::playful, dt);
-            } else {
-                t.current_x = t.target_x + t.swipe_offset;
-            }
-            t.current_y = reduced_motion ? t.target_y :
-                aida::motion::critically_damped_step(t.current_y, t.target_y,
-                    t.velocity_y, 0.090f, dt);
-
-            float live_x = t.current_x + (t.swipe_dismissing ? 0.0f : t.swipe_offset);
-            ImVec2 tl(live_x, t.current_y);
-            ImVec2 br(live_x + toast_width, t.current_y + h);
-
-            float alpha = t.fade_out;
-            if (t.swipe_dismissing) alpha *= t.dismiss_alpha_decay;
-            float intro_eased = aida::motion::ease::out_quint(t.intro_progress);
-            alpha *= intro_eased;
-            if (alpha < 0.0f) alpha = 0.0f;
-            if (alpha > 1.0f) alpha = 1.0f;
-
-            if (alpha <= 0.001f) {
-                continue;
-            }
-
-            float lift = t.hover_amount * 2.0f;
-            tl.y -= lift;
-            br.y -= lift;
-
-            ImU32 sev_color = detail::severity_color(t.type);
-            ImU32 sev_soft  = detail::severity_soft(t.type);
-
-            aida::ui::blur::render_drop_shadow(dl, tl, br, rounding, 3,
-                                                0.40f * alpha,
-                                                ImVec2(0.0f, (8.0f + t.hover_amount * 4.0f) * ui_scale));
-
-            aida::ui::blur::render_glass_fill(dl, tl, br, rounding, alpha);
-
-            ImU32 surface_overlay = aida::ui::with_alpha(th.bg_overlay, alpha * (th.is_dark ? 0.16f : 0.10f));
-            dl->AddRectFilled(tl, br, surface_overlay, rounding);
-
-            ImU32 sev_wash = detail::multiply_alpha(sev_soft, alpha * detail::severity_wash_alpha(t.type, th.is_dark));
-            dl->AddRectFilled(tl, br, sev_wash, rounding);
-
-            ImU32 highlight_base = th.is_dark ? th.text_primary : th.text_dim;
-            ImU32 hi_top = aida::ui::with_alpha(highlight_base, alpha * (th.is_dark ? 0.10f : 0.06f));
-            ImU32 hi_bot = aida::ui::with_alpha(highlight_base, 0.0f);
-            dl->AddRectFilledMultiColor(tl, ImVec2(br.x, tl.y + h * 0.55f),
-                                          hi_top, hi_top, hi_bot, hi_bot);
-
-            aida::ui::blur::render_glass_border(dl, tl, br, rounding, alpha, ui_scale);
-
-            ImU32 sev_border = detail::multiply_alpha(sev_color, alpha * 0.45f);
-            dl->AddRect(tl, br, sev_border, rounding, 0, ui_scale);
-            dl->AddRectFilled(tl, ImVec2(tl.x + 3.0f * ui_scale, br.y), detail::multiply_alpha(sev_color, alpha * 0.70f), 1.5f * ui_scale);
-
-            float icon_cx = tl.x + padding + icon_box * 0.5f;
-            float icon_cy = tl.y + h * 0.5f;
-            ImVec2 icon_center(icon_cx, icon_cy);
-
-            float ring_radius = icon_box * 0.5f - ui_scale;
-            float progress = 1.0f;
-            if (t.duration > 0.0001f) progress = remaining / t.duration;
-            if (progress < 0.0f) progress = 0.0f;
-            if (progress > 1.0f) progress = 1.0f;
-
-            ImU32 icon_bg = detail::multiply_alpha(sev_color, alpha * 0.16f);
-            dl->AddCircleFilled(icon_center, ring_radius - 1.5f, icon_bg, 32);
-
-            detail::draw_progress_ring(dl, icon_center, ring_radius, 1.5f * ui_scale,
-                                         progress, sev_color, alpha);
-
-            detail::draw_severity_icon(dl, icon_center, t.type, sev_color, sev_soft, alpha, ui_scale);
-
-            float text_x = icon_cx + icon_box * 0.5f + 10.0f * ui_scale;
-            float text_y = tl.y + (h - font_size_msg) * 0.5f;
-
-            ImVec2 msg_size = font_msg->CalcTextSizeA(font_size_msg, FLT_MAX, wrap_w, t.message.c_str());
-            if (msg_size.y > font_size_msg + 1.0f) {
-                text_y = tl.y + padding - ui_scale;
-            }
-
-            ImU32 text_col_final = detail::multiply_alpha(text_primary, alpha);
-            dl->AddText(font_msg, font_size_msg, ImVec2(text_x, text_y),
-                        text_col_final, t.message.c_str(), nullptr, wrap_w);
-
-            if (t.has_action) {
-                ImFont* af = font_action;
-                float af_size = font_size_action;
-                ImVec2 lbl_size = af->CalcTextSizeA(af_size, FLT_MAX, 0.0f, t.action.label.c_str());
-                float btn_w = lbl_size.x + 18.0f * ui_scale;
-                float btn_h = 24.0f * ui_scale;
-                ImVec2 btn_tl(br.x - padding - btn_w, tl.y + (h - btn_h) * 0.5f);
-                ImVec2 btn_br(btn_tl.x + btn_w, btn_tl.y + btn_h);
-
-                bool btn_hovered = mouse.x >= btn_tl.x && mouse.x <= btn_br.x &&
-                                   mouse.y >= btn_tl.y && mouse.y <= btn_br.y &&
-                                   !t.dismissing && !t.swipe_dismissing;
-
-                float action_mix = th.is_dark ? (btn_hovered ? 0.20f : 0.14f) : (btn_hovered ? 0.14f : 0.09f);
-                ImU32 btn_fill_base = aida::ui::mix(th.bg_overlay, sev_color, action_mix);
-                ImU32 btn_fill = aida::ui::with_alpha(btn_fill_base, alpha * (btn_hovered ? 0.78f : 0.56f));
-                ImU32 btn_border = detail::multiply_alpha(sev_color, alpha * (btn_hovered ? 0.85f : 0.55f));
-                ImU32 btn_text = detail::multiply_alpha(text_primary, alpha);
-
-                dl->AddRectFilled(btn_tl, btn_br, btn_fill, btn_h * 0.5f);
-                dl->AddRect(btn_tl, btn_br, btn_border, btn_h * 0.5f, 0, 1.0f);
-                dl->AddText(af, af_size,
-                             ImVec2(btn_tl.x + (btn_w - lbl_size.x) * 0.5f,
-                                    btn_tl.y + (btn_h - af_size) * 0.5f),
-                             btn_text, t.action.label.c_str());
-
-                if (btn_hovered && click_completed) {
-                    t.action_clicked_this_frame = true;
-                }
-            }
-
-            bool close_hovered = false;
-            if (!t.has_action) {
-                float close_size = 7.0f * ui_scale;
-                float close_pad  = 8.0f * ui_scale;
-                ImVec2 close_center(br.x - close_pad - close_size,
-                                     tl.y + close_pad + close_size);
-                float close_alpha = alpha * (0.30f + 0.65f * t.hover_amount);
-                ImU32 close_col = detail::multiply_alpha(text_secondary, close_alpha);
-                float ck = close_size * 0.55f;
-                dl->AddLine(ImVec2(close_center.x - ck, close_center.y - ck),
-                             ImVec2(close_center.x + ck, close_center.y + ck), close_col, 1.5f);
-                dl->AddLine(ImVec2(close_center.x - ck, close_center.y + ck),
-                             ImVec2(close_center.x + ck, close_center.y - ck), close_col, 1.5f);
-
-                close_hovered = mouse.x >= close_center.x - close_size &&
-                                 mouse.x <= close_center.x + close_size &&
-                                 mouse.y >= close_center.y - close_size &&
-                                 mouse.y <= close_center.y + close_size &&
-                                 t.hover_amount > 0.05f &&
-                                 !t.dismissing && !t.swipe_dismissing;
-            }
-
-            bool body_clicked_for_dismiss = click_completed &&
-                                             !t.has_action &&
-                                             !close_hovered;
-
-            if (close_hovered && click_completed) {
-                t.dismissing = true;
-            } else if (body_clicked_for_dismiss) {
-                t.dismissing = true;
-            }
-        }
-
-        for (auto& t : active_toasts) {
-            if (t.action_clicked_this_frame && t.action.on_click) {
-                if (deferred_callback_count < deferred_callbacks.size())
-                    deferred_callbacks[deferred_callback_count++] = std::move(t.action.on_click);
-                t.action.on_click = nullptr;
-                t.action_clicked_this_frame = false;
-                t.dismissing = true;
-            } else {
-                t.action_clicked_this_frame = false;
-            }
-        }
-
-        active_toasts.erase(
-            std::remove_if(active_toasts.begin(), active_toasts.end(),
-                            [](const toast_t& t) {
-                                return (t.dismissing && t.fade_out <= 0.001f) ||
-                                       (t.swipe_dismissing && t.dismiss_alpha_decay <= 0.001f);
-                            }),
-            active_toasts.end());
-        {
-            std::lock_guard<std::mutex> lk(detail::s_mtx);
-            for (auto& incoming : detail::s_toasts) {
-                const bool duplicate = std::any_of(active_toasts.begin(), active_toasts.end(),
-                    [&incoming](const toast_t& active) {
-                        return active.message == incoming.message &&
-                            active.elapsed >= 0.0f && active.elapsed < DEDUP_WINDOW;
-                    });
-                if (!duplicate)
-                    active_toasts.push_back(std::move(incoming));
-            }
-            detail::s_toasts = std::move(active_toasts);
-            while (detail::s_toasts.size() > MAX_VISIBLE * std::size_t{2})
-                detail::s_toasts.erase(detail::s_toasts.begin());
-        }
-
-        for (std::size_t i = 0; i < deferred_callback_count; ++i)
-            if (deferred_callbacks[i]) deferred_callbacks[i]();
-    }
 }

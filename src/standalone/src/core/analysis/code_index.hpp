@@ -2,7 +2,6 @@
 
 #include <string>
 #include <string_view>
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -13,7 +12,6 @@
 #include "../infra/executor.hpp"
 #include "../infra/taskflow_runtime.hpp"
 #include "../../helpers/diag_log.hpp"
-#endif
 #include <vector>
 #include <atomic>
 #include <filesystem>
@@ -439,13 +437,6 @@ public:
 
     std::uint64_t start_indexing()
     {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-        state_->running.store(false, std::memory_order_release);
-        state_->task_id.store(0, std::memory_order_release);
-        state_->status.store(index_state_t::standby, std::memory_order_release);
-        set_detail(state_, "Workspace text indexing is available in the native standalone runtime");
-        return 0;
-#else
         bool expected = false;
         if (!state_->running.compare_exchange_strong(expected, true,
                 std::memory_order_acq_rel, std::memory_order_acquire))
@@ -552,19 +543,14 @@ public:
         if (state_->stop.load(std::memory_order_acquire))
             aida::infra::executor::cancel(submitted.task_id);
         return submitted.task_id;
-#endif
     }
 
     void stop_indexing() noexcept
     {
         state_->stop.store(true, std::memory_order_release);
         const std::uint64_t active_task = state_->task_id.load(std::memory_order_acquire);
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
         if (active_task != 0)
             aida::infra::executor::cancel(active_task);
-#else
-        static_cast<void>(active_task);
-#endif
     }
 
     std::vector<search_result_t> search(const std::string& query,
@@ -668,13 +654,11 @@ private:
         const std::filesystem::path workspace_path =
             path_from_utf8(shared->workspace).lexically_normal();
         bool workspace_root_acceptable = workspace_path.is_absolute();
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
         const DWORD workspace_attributes = GetFileAttributesW(workspace_path.c_str());
         workspace_root_acceptable = workspace_root_acceptable &&
             workspace_attributes != INVALID_FILE_ATTRIBUTES &&
             (workspace_attributes & FILE_ATTRIBUTE_DIRECTORY) != 0 &&
             (workspace_attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0;
-#endif
         if (!workspace_root_acceptable) {
             shared->status.store(index_state_t::error, std::memory_order_release);
             set_detail(shared,
@@ -711,11 +695,9 @@ private:
             std::error_code entry_ec;
             const bool symlink = entry.is_symlink(entry_ec) && !entry_ec;
             bool reparse_point = false;
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
             const DWORD attributes = GetFileAttributesW(entry.path().c_str());
             reparse_point = attributes != INVALID_FILE_ATTRIBUTES &&
                 (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
-#endif
             if (symlink || reparse_point) {
                 entry_ec.clear();
                 if (entry.is_directory(entry_ec) && !entry_ec)
@@ -806,10 +788,8 @@ private:
             std::error_code increment_error;
             iter.increment(increment_error);
             if (increment_error) {
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
                 diag::log_tagged_fmt("code_index", "enumeration_skip error='%s'",
                     increment_error.message().c_str());
-#endif
                 ++skipped_files;
                 truncated = true;
                 break;

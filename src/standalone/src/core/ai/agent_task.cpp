@@ -28,7 +28,7 @@
 #include "provider_catalog.hpp"
 #include "../infra/executor.hpp"
 #include "../ui/task_center.hpp"
-#include "../ui/application_view_registry.hpp"
+#include "../ui/application_ui_runtime.hpp"
 
 #include "../helpers/diag_log.hpp"
 
@@ -460,7 +460,8 @@ namespace task {
 			registration.stage = "Running agent workflow";
 			registration.cancellation_is_safe = true;
 			registration.callbacks.focus = [] {
-				(void)aida::ui::application_views::open_or_focus(aida::ui::stable_view_id_t("view.ai.agents"));
+				(void)aida::ui::application_ui::execute_action("view.focus.view.ai.agents",
+					aida::ui::action_invocation_source_t::command_palette);
 			};
 			(void)aida::ui::task_center::register_executor_job(submission.task_id, std::move(registration));
 		}

@@ -10,10 +10,6 @@
 #include "test_all_mcp.h"
 #include "test_all_ui.h"
 
-#include "imgui/imgui.h"
-#include "imgui/imgui_internal.h"
-
-#include "../ui/theme.hpp"
 #include "../debugger/debugger_engine.hpp"
 #include "../network/mitm_proxy.hpp"
 #include "../network/burp/camoufox_bridge.hpp"
@@ -36,7 +32,7 @@
 #include "../../helpers/diag_log.hpp"
 #include "../diagnostics/testlab_hung_packet.hpp"
 #include "../diagnostics/metadata_ring.hpp"
-#include "../../helpers/globals.h"
+#include "../ui/ui_thread_dispatcher.hpp"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -181,19 +177,8 @@ namespace test_all_features {
 		std::atomic<bool> g_first_failure_recorded{ false };
 
 		std::mutex        g_log_mtx;
-		enum class overlay_log_severity_t : std::uint8_t {
-			normal,
-			success,
-			warning,
-			error
-		};
-		struct overlay_log_line_t {
-			std::string text;
-			overlay_log_severity_t severity = overlay_log_severity_t::normal;
-		};
 		std::deque<overlay_log_line_t> g_log_lines;
 		constexpr std::size_t kMaxLogLines = 4096;
-		constexpr std::size_t kOverlayRenderTailLines = 512;
 		std::atomic<std::uint64_t> g_log_version{ 0 };
 		std::atomic<std::uint64_t> g_progress_version{ 0 };
 		std::atomic<std::uint64_t> g_overlay_lock_busy_total{ 0 };
@@ -1122,12 +1107,13 @@ namespace test_all_features {
 			const std::uint64_t deadline = now_ms_tick() + timeout_ms;
 			for (;;) {
 				try {
-					if (st.results_mutex.try_lock()) {
-						std::lock_guard<std::mutex> lk(st.results_mutex, std::adopt_lock);
-						found = st.results.size();
-						first_addr = st.results.empty() ? 0 : st.results.front().address;
-						return true;
-					}
+				if (st.results_mutex.try_lock()) {
+					std::lock_guard<std::mutex> lk(st.results_mutex, std::adopt_lock);
+					const auto snapshot = st.results;
+					found = snapshot ? snapshot->size() : 0;
+					first_addr = (snapshot && !snapshot->empty()) ? snapshot->front().address : 0;
+					return true;
+				}
 				} catch (...) {
 					return false;
 				}
@@ -3435,7 +3421,7 @@ namespace test_all_features {
 			bool finished = false;
 			for (int i = 0; i < 240; ++i) {
 				if (cancelled()) break;
-				if (!cfg_view::g_state.building.load()) { finished = true; break; }
+				if (!cfg_view::building()) { finished = true; break; }
 				Sleep(25);
 			}
 
@@ -4612,8 +4598,7 @@ namespace test_all_features {
 				return false;
 			}
 
-			aida::ui_thread::post([]() { globals::ui::test_all_visible = true; },
-				"testlab", "queue_set_visible", "queue_start_tests");
+			set_overlay_visible(true);
 			set_phase("Initializing...");
 			set_step("start_tests submitted");
 			const std::uint64_t queued_at = now_ms_tick();
@@ -4738,18 +4723,6 @@ namespace test_all_features {
 			return interactive_cancel_cleanup_post_t::posted;
 		}
 
-		void request_interactive_cancel() {
-			g_cancel_requested.store(true, std::memory_order_release);
-			set_phase("Cancelling...");
-			const interactive_cancel_cleanup_post_t post_state = post_interactive_cancel_cleanup();
-			if (post_state == interactive_cancel_cleanup_post_t::posted)
-				set_step("cancel cleanup queued");
-			else if (post_state == interactive_cancel_cleanup_post_t::already_inflight)
-				set_step("cancel cleanup already queued");
-			else
-				set_step("cancel cleanup queue unavailable");
-		}
-
 		void cancel_tests_blocking_shutdown_impl() {
 			g_cancel_requested.store(true, std::memory_order_release);
 			diag::log_tagged_fmt("test_all", "user cancelled Test All Features");
@@ -4821,8 +4794,7 @@ namespace test_all_features {
 
 	bool trigger_from_hotkey(const char* source) {
 		const char* tag = source && source[0] ? source : "ctrl_shift_t";
-		aida::ui_thread::post([]() { globals::ui::test_all_visible = true; },
-			"testlab", "hotkey_set_visible", "trigger_from_hotkey");
+		set_overlay_visible(true);
 		char snap_before[1200] = {};
 		format_debug_snapshot(snap_before, sizeof(snap_before));
 		diag::log_tagged_fmt("ui", "test_all_start hotkey=%s before={%s}", tag, snap_before);
@@ -4896,7 +4868,7 @@ namespace test_all_features {
 		state = mix_overlay_dirty_value(state, g_driver_attached.load(std::memory_order_acquire) ? 1ull : 0ull);
 		state = mix_overlay_dirty_value(state, g_running.load(std::memory_order_acquire) ? 1ull : 0ull);
 		state = mix_overlay_dirty_value(state, g_start_queued.load(std::memory_order_acquire) ? 1ull : 0ull);
-		state = mix_overlay_dirty_value(state, globals::ui::test_all_visible ? 1ull : 0ull);
+		state = mix_overlay_dirty_value(state, g_overlay_visible.load(std::memory_order_acquire) ? 1ull : 0ull);
 		state = mix_overlay_dirty_value(state, static_cast<std::uint64_t>(g_active_phase_index.load(std::memory_order_acquire)));
 		state = mix_overlay_dirty_value(state, static_cast<std::uint64_t>(g_active_phase_planned.load(std::memory_order_acquire)));
 		state = mix_overlay_dirty_value(state, static_cast<std::uint64_t>(g_active_phase_completed.load(std::memory_order_acquire)));
@@ -4955,227 +4927,80 @@ namespace test_all_features {
 		}
 	}
 
-	void render_overlay(float vw, float vh) {
-		if (!globals::ui::test_all_visible) {
-			g_overlay_visible.store(false, std::memory_order_release);
-			return;
+	void set_overlay_visible(bool visible) {
+		g_overlay_visible.store(visible, std::memory_order_release);
+		g_progress_version.fetch_add(1, std::memory_order_acq_rel);
+	}
+
+	bool overlay_visible() {
+		return g_overlay_visible.load(std::memory_order_acquire);
+	}
+
+	overlay_run_snapshot_t overlay_run_snapshot() {
+		overlay_run_snapshot_t out;
+		out.running = is_running();
+		out.total = g_total.load(std::memory_order_acquire);
+		out.passed = g_passed.load(std::memory_order_acquire);
+		out.failed = g_failed.load(std::memory_order_acquire);
+		out.skipped = g_skipped.load(std::memory_order_acquire);
+		out.target_pid = g_target_pid.load(std::memory_order_acquire);
+		out.driver_attached = g_driver_attached.load(std::memory_order_acquire);
+		return out;
+	}
+
+	bool overlay_log_tail_snapshot(std::size_t max_lines,
+		std::uint64_t& inout_version,
+		std::vector<overlay_log_line_t>& out,
+		std::size_t* total_out,
+		bool* changed_out)
+	{
+		bool changed = false;
+		std::size_t total = 0;
+		const bool ok = try_snapshot_log_tail_if_changed(max_lines, inout_version, out, &total, &changed);
+		if (!ok) {
+			g_overlay_lock_busy_total.fetch_add(1, std::memory_order_acq_rel);
+			g_overlay_snapshot_busy.store(true, std::memory_order_release);
+			g_overlay_snapshot_changed.store(false, std::memory_order_release);
+			if (total_out)
+				*total_out = 0;
+			if (changed_out)
+				*changed_out = false;
+			return false;
 		}
-		g_overlay_visible.store(true, std::memory_order_release);
-		const auto overlay_render_start = std::chrono::steady_clock::now();
-		std::size_t overlay_rendered_rows = 0;
-		std::size_t overlay_cached_rows = 0;
-		std::size_t overlay_total_rows = 0;
-		bool overlay_snapshot_busy_now = false;
-		bool overlay_snapshot_changed_now = false;
+		g_overlay_snapshot_busy.store(false, std::memory_order_release);
+		g_overlay_snapshot_changed.store(changed, std::memory_order_release);
+		g_overlay_total_rows.store(static_cast<std::uint64_t>(total), std::memory_order_release);
+		g_overlay_cached_rows.store(static_cast<std::uint64_t>(out.size()), std::memory_order_release);
+		g_overlay_rendered_rows.store(static_cast<std::uint64_t>(out.size()), std::memory_order_release);
+		if (total_out)
+			*total_out = total;
+		if (changed_out)
+			*changed_out = changed;
+		return true;
+	}
 
-		const auto& t = aida::ui::resolved();
+	void note_overlay_render_elapsed(std::uint64_t us) {
+		g_overlay_render_elapsed_us.store(us, std::memory_order_release);
+	}
 
-		float ow = vw * 0.7f;
-		if (ow < 600.f) ow = 600.f;
-		if (ow > vw - 40.f) ow = vw - 40.f;
+	const char* full_test_log_path() {
+		return log_path();
+	}
 
-		float oh = vh * 0.75f;
-		if (oh < 400.f) oh = 400.f;
-		if (oh > vh - 40.f) oh = vh - 40.f;
+	const char* full_test_target_log_path() {
+		return target_log_path();
+	}
 
-		float ox = (vw - ow) * 0.5f;
-		float oy = (vh - oh) * 0.5f;
-
-		ImGui::SetNextWindowPos(ImVec2(ox, oy), ImGuiCond_Always);
-		ImGui::SetNextWindowSize(ImVec2(ow, oh), ImGuiCond_Always);
-
-		ImGuiWindowFlags flags =
-			ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
-			ImGuiWindowFlags_NoCollapse | ImGuiWindowFlags_NoSavedSettings |
-			ImGuiWindowFlags_NoDocking;
-
-		bool open = globals::ui::test_all_visible;
-		if (ImGui::Begin("Test All Features##test_all_overlay", &open, flags)) {
-
-			bool running = g_running.load(std::memory_order_acquire) || g_start_queued.load(std::memory_order_acquire);
-
-
-			if (running) ImGui::BeginDisabled();
-			if (ImGui::Button("TEST ALL FEATURES", ImVec2(190.f, 30.f))) {
-				start_tests();
-			}
-			if (running) ImGui::EndDisabled();
-
-			ImGui::SameLine();
-
-			if (!running) ImGui::BeginDisabled();
-			if (ImGui::Button("Cancel", ImVec2(100.f, 30.f))) {
-				request_interactive_cancel();
-			}
-			if (!running) ImGui::EndDisabled();
-
-			ImGui::SameLine(0.f, 20.f);
-
-
-			std::string phase_label = load_label_snapshot(g_phase_label);
-			if (!phase_label.empty()) {
-				ImGui::Text("Phase: %s", phase_label.c_str());
-			}
-
-			ImGui::Dummy(ImVec2(0.f, 6.f));
-
-
-			{
-				std::uint32_t tpid = g_target_pid.load();
-				bool attached = g_driver_attached.load();
-				if (tpid != 0 && attached) {
-					ImGui::PushStyleColor(ImGuiCol_Text, t.success);
-					ImGui::Text("Target pid: %u   Driver: ATTACHED", tpid);
-					ImGui::PopStyleColor();
-				} else if (tpid != 0) {
-					ImGui::PushStyleColor(ImGuiCol_Text, t.warning);
-					ImGui::Text("Target pid: %u   Driver: NOT ATTACHED", tpid);
-					ImGui::PopStyleColor();
-				} else {
-					ImGui::TextUnformatted("Target pid: (none)   Driver: not attached");
-				}
-			}
-
-			ImGui::Dummy(ImVec2(0.f, 4.f));
-
-
-			{
-				int total   = g_total.load();
-				int passed  = g_passed.load();
-				int failed  = g_failed.load();
-				int skipped = g_skipped.load();
-				int done    = passed + failed + skipped;
-
-				ImGui::Text("Total: %d", total);
-				ImGui::SameLine(0.f, 16.f);
-
-				ImGui::PushStyleColor(ImGuiCol_Text, t.success);
-				ImGui::Text("Passed: %d", passed);
-				ImGui::PopStyleColor();
-				ImGui::SameLine(0.f, 16.f);
-
-				ImGui::PushStyleColor(ImGuiCol_Text, t.error);
-				ImGui::Text("Failed: %d", failed);
-				ImGui::PopStyleColor();
-				ImGui::SameLine(0.f, 16.f);
-
-				ImGui::PushStyleColor(ImGuiCol_Text, t.warning);
-				ImGui::Text("Skipped: %d", skipped);
-				ImGui::PopStyleColor();
-				ImGui::SameLine(0.f, 16.f);
-
-				if (total > 0) {
-					float progress = static_cast<float>(done) / static_cast<float>(total);
-					ImGui::ProgressBar(progress, ImVec2(200.f, 20.f));
-				}
-			}
-
-			ImGui::Dummy(ImVec2(0.f, 4.f));
-			ImGui::Separator();
-			ImGui::Dummy(ImVec2(0.f, 4.f));
-
-
-			ImGui::TextUnformatted("TEST LOG");
-
-			float log_h = oh - ImGui::GetCursorPosY() - 30.f;
-			if (log_h < 100.f) log_h = 100.f;
-
-			ImGui::BeginChild("##test_all_log", ImVec2(-1.f, log_h), true,
-				ImGuiWindowFlags_HorizontalScrollbar);
-
-			if (g_code_font) ImGui::PushFont(g_code_font);
-
-			static std::vector<overlay_log_line_t> log_snapshot;
-			static std::uint64_t log_snapshot_version = 0;
-			static std::size_t log_snapshot_total = 0;
-			if (try_snapshot_log_tail_if_changed(kOverlayRenderTailLines, log_snapshot_version, log_snapshot, &log_snapshot_total, &overlay_snapshot_changed_now)) {
-				overlay_total_rows = log_snapshot_total;
-				overlay_cached_rows = log_snapshot.size();
-			} else {
-				overlay_snapshot_busy_now = true;
-				g_overlay_lock_busy_total.fetch_add(1, std::memory_order_acq_rel);
-				overlay_total_rows = log_snapshot_total;
-				overlay_cached_rows = log_snapshot.size();
-			}
-			if (overlay_snapshot_busy_now) {
-				ImGui::PushStyleColor(ImGuiCol_Text, t.warning);
-				ImGui::TextUnformatted("Test log snapshot is busy");
-				ImGui::PopStyleColor();
-			} else {
-				ImGuiListClipper clipper;
-				const int row_count = static_cast<int>(log_snapshot.size());
-				clipper.Begin(row_count, ImGui::GetTextLineHeightWithSpacing());
-				while (clipper.Step()) {
-					for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
-						const overlay_log_line_t& line = log_snapshot[static_cast<std::size_t>(row)];
-						switch (line.severity) {
-						case overlay_log_severity_t::success:
-							ImGui::PushStyleColor(ImGuiCol_Text, t.success);
-							ImGui::TextUnformatted(line.text.c_str());
-							ImGui::PopStyleColor();
-							break;
-						case overlay_log_severity_t::warning:
-							ImGui::PushStyleColor(ImGuiCol_Text, t.warning);
-							ImGui::TextUnformatted(line.text.c_str());
-							ImGui::PopStyleColor();
-							break;
-						case overlay_log_severity_t::error:
-							ImGui::PushStyleColor(ImGuiCol_Text, t.error);
-							ImGui::TextUnformatted(line.text.c_str());
-							ImGui::PopStyleColor();
-							break;
-						default:
-							ImGui::TextUnformatted(line.text.c_str());
-							break;
-						}
-					}
-					overlay_rendered_rows += static_cast<std::size_t>(clipper.DisplayEnd - clipper.DisplayStart);
-				}
-			}
-
-
-			if (running) {
-				ImGui::SetScrollHereY(1.0f);
-			}
-
-			if (g_code_font) ImGui::PopFont();
-
-			ImGui::EndChild();
-
-
-			ImGui::Text("Log file: %s", log_path());
-			ImGui::Text("Target log: %s", target_log_path());
-		}
-		ImGui::End();
-
-		globals::ui::test_all_visible = open;
-		g_overlay_visible.store(globals::ui::test_all_visible, std::memory_order_release);
-		g_overlay_snapshot_busy.store(overlay_snapshot_busy_now, std::memory_order_release);
-		g_overlay_snapshot_changed.store(overlay_snapshot_changed_now, std::memory_order_release);
-		g_overlay_total_rows.store(static_cast<std::uint64_t>(overlay_total_rows), std::memory_order_release);
-		g_overlay_cached_rows.store(static_cast<std::uint64_t>(overlay_cached_rows), std::memory_order_release);
-		g_overlay_rendered_rows.store(static_cast<std::uint64_t>(overlay_rendered_rows), std::memory_order_release);
-		const std::uint64_t overlay_elapsed_us = static_cast<std::uint64_t>(
-			std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::steady_clock::now() - overlay_render_start).count());
-		g_overlay_render_elapsed_us.store(overlay_elapsed_us, std::memory_order_release);
-		static std::uint64_t s_last_overlay_slow_log_ms = 0;
-		const std::uint64_t now_ms = now_ms_tick();
-		const bool overlay_slow = overlay_elapsed_us >= (is_running() ? 8000ull : 4000ull);
-		if (overlay_slow && now_ms - s_last_overlay_slow_log_ms >= 5000ull) {
-			s_last_overlay_slow_log_ms = now_ms;
-			diag::log_tagged_fmt("test_all",
-				"overlay_slow elapsed_us=%llu visible=%d running=%d total_rows=%zu cached_rows=%zu rendered_rows=%zu log_version=%llu snapshot_changed=%d snapshot_busy=%d lock_busy_total=%llu",
-				static_cast<unsigned long long>(overlay_elapsed_us),
-				globals::ui::test_all_visible ? 1 : 0,
-				is_running() ? 1 : 0,
-				overlay_total_rows,
-				overlay_cached_rows,
-				overlay_rendered_rows,
-				static_cast<unsigned long long>(g_log_version.load(std::memory_order_acquire)),
-				overlay_snapshot_changed_now ? 1 : 0,
-				overlay_snapshot_busy_now ? 1 : 0,
-				static_cast<unsigned long long>(g_overlay_lock_busy_total.load(std::memory_order_acquire)));
-		}
+	void request_interactive_cancel() {
+		g_cancel_requested.store(true, std::memory_order_release);
+		set_phase("Cancelling...");
+		const interactive_cancel_cleanup_post_t post_state = post_interactive_cancel_cleanup();
+		if (post_state == interactive_cancel_cleanup_post_t::posted)
+			set_step("cancel cleanup queued");
+		else if (post_state == interactive_cancel_cleanup_post_t::already_inflight)
+			set_step("cancel cleanup already queued");
+		else
+			set_step("cancel cleanup queue unavailable");
 	}
 
 }

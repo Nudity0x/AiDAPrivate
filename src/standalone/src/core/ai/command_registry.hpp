@@ -54,6 +54,8 @@ namespace commands {
 	std::vector<std::string>              extract_placeholder_hints(const std::string& template_text);
 	std::string                           apply_placeholders(const std::string& template_text,
 	                                                          const std::vector<std::string>& args);
+	int                                   fuzzy_score_text(const std::string& query_lower,
+	                                                       const std::string& target_lower);
 
 
 }

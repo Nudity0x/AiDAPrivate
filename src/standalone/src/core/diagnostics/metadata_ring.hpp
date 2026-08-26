@@ -1,14 +1,10 @@
 #pragma once
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-#include "../../preview/shell_preview_platform.hpp"
-#else
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <Windows.h>
 #include "../../helpers/diag_log.hpp"
-#endif
 
 #include <atomic>
 #include <chrono>
@@ -28,28 +24,15 @@ inline constexpr std::size_t kMetadataRingMaxReasonLen = 128;
 inline constexpr std::size_t kMetadataRingRateLimitMs = 200;
 
 inline std::uint64_t platform_tick_ms() {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()).count());
-#else
     return static_cast<std::uint64_t>(GetTickCount64());
-#endif
 }
 
 inline DWORD platform_process_id() {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    return 0;
-#else
     return GetCurrentProcessId();
-#endif
 }
 
 inline DWORD platform_thread_id() {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    return 0;
-#else
     return GetCurrentThreadId();
-#endif
 }
 
 enum class breadcrumb_category_t : std::uint8_t {
@@ -198,7 +181,7 @@ struct breadcrumb_options_t {
     bool force = false;
 };
 
-inline void emit(breadcrumb_options_t&& opts) {
+inline void emit_breadcrumb(breadcrumb_options_t&& opts) {
     if (!opts.force && should_rate_limit(opts.category))
         return;
 
@@ -255,13 +238,13 @@ inline void emit(breadcrumb_options_t&& opts) {
         static_cast<unsigned>(opts.priority));
 }
 
-inline void emit(breadcrumb_category_t category, const char* label, const char* reason = nullptr, bool force = false) {
+inline void emit_breadcrumb(breadcrumb_category_t category, const char* label, const char* reason = nullptr, bool force = false) {
     breadcrumb_options_t opts;
     opts.category = category;
     opts.label = label;
     opts.reason = reason;
     opts.force = force;
-    emit(std::move(opts));
+    emit_breadcrumb(std::move(opts));
 }
 
 inline void request_shutdown() {

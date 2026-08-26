@@ -1,0 +1,47 @@
+<RCC>
+    <qresource prefix="/qss">
+        <file alias="aida_dark.qss">qss/aida_dark.qss</file>
+    </qresource>
+    <qresource prefix="/icons">
+        <file alias="caret-down.svg">icons/caret-down.svg</file>
+        <file alias="caret-left.svg">icons/caret-left.svg</file>
+        <file alias="caret-right.svg">icons/caret-right.svg</file>
+        <file alias="caret-up.svg">icons/caret-up.svg</file>
+        <file alias="check.svg">icons/check.svg</file>
+        <file alias="checkbox-checked.svg">icons/checkbox-checked.svg</file>
+        <file alias="checkbox-partial.svg">icons/checkbox-partial.svg</file>
+        <file alias="checkbox-unchecked.svg">icons/checkbox-unchecked.svg</file>
+        <file alias="chevron-down.svg">icons/chevron-down.svg</file>
+        <file alias="chevron-right.svg">icons/chevron-right.svg</file>
+        <file alias="clear-x.svg">icons/clear-x.svg</file>
+        <file alias="copy.svg">icons/copy.svg</file>
+        <file alias="files-empty.svg">icons/files-empty.svg</file>
+        <file alias="function.svg">icons/function.svg</file>
+        <file alias="history.svg">icons/history.svg</file>
+        <file alias="logo.svg">icons/logo.svg</file>
+        <file alias="padlock.svg">icons/padlock.svg</file>
+        <file alias="power-cord.svg">icons/power-cord.svg</file>
+        <file alias="radio-checked.svg">icons/radio-checked.svg</file>
+        <file alias="radio-unchecked.svg">icons/radio-unchecked.svg</file>
+        <file alias="search.svg">icons/search.svg</file>
+        <file alias="settings.svg">icons/settings.svg</file>
+        <file alias="severity-error.svg">icons/severity-error.svg</file>
+        <file alias="severity-info.svg">icons/severity-info.svg</file>
+        <file alias="severity-warning.svg">icons/severity-warning.svg</file>
+        <file alias="spinner.svg">icons/spinner.svg</file>
+    </qresource>
+    <qresource prefix="/fonts">
+        <file alias="Inter-Regular.otf">fonts/Inter-Regular.otf</file>
+        <file alias="Inter-Medium.otf">fonts/Inter-Medium.otf</file>
+        <file alias="Inter-SemiBold.otf">fonts/Inter-SemiBold.otf</file>
+        <file alias="Inter-Bold.otf">fonts/Inter-Bold.otf</file>
+        <file alias="JetBrainsMono-Regular.ttf">fonts/JetBrainsMono-Regular.ttf</file>
+        <file alias="JetBrainsMono-SemiBold.ttf">fonts/JetBrainsMono-SemiBold.ttf</file>
+        <file alias="verdana.ttf">fonts/verdana.ttf</file>
+    </qresource>
+    <qresource prefix="/img">
+        <file alias="aidalogo.png">img/aidalogo.png</file>
+        <file alias="background.webp">img/background.webp</file>
+    </qresource>
+    <qresource prefix="/ghidra"/>
+</RCC>

@@ -57,6 +57,28 @@ std::atomic<std::uint64_t> g_active_scan_generation{0};
 std::mutex g_scan_operation_mutex;
 std::shared_ptr<scan_operation_t> g_active_scan_operation;
 
+std::mutex g_progress_sink_mutex;
+progress_sink_fn g_progress_sink;
+
+void emit_scan_progress(float progress, const char* stage, std::uint64_t generation) {
+	progress_sink_fn sink;
+	{
+		std::lock_guard<std::mutex> lock(g_progress_sink_mutex);
+		sink = g_progress_sink;
+	}
+	if (sink)
+		sink(progress, stage, generation);
+}
+
+std::shared_ptr<const std::vector<scan_result_t>> empty_results_snapshot() {
+	static const auto empty = std::make_shared<const std::vector<scan_result_t>>();
+	return empty;
+}
+
+std::size_t results_size(const state_t& st) {
+	return st.results ? st.results->size() : 0;
+}
+
 std::shared_ptr<scan_operation_t> begin_scan_operation() {
 	auto operation = std::make_shared<scan_operation_t>();
 	operation->generation = g_scan_generation.fetch_add(1, std::memory_order_acq_rel) + 1;
@@ -93,6 +115,7 @@ void publish_scan_progress(const std::shared_ptr<scan_operation_t>& operation,
 	scanner_task_center::update_executor_task(task_id,
 		aida::ui::task_center::task_state_t::running, progress,
 		stage ? stage : "Scanning");
+	emit_scan_progress(progress, stage ? stage : "Scanning", operation->generation);
 }
 
 void finish_scan_operation(const std::shared_ptr<scan_operation_t>& operation,
@@ -112,6 +135,12 @@ void finish_scan_operation(const std::shared_ptr<scan_operation_t>& operation,
 		g_state.scanning.store(false, std::memory_order_release);
 		g_state.scan_thread_done.store(true, std::memory_order_release);
 	}
+	emit_scan_progress(
+		terminal == scan_terminal_t::cancelled
+			? g_state.scan_progress.load(std::memory_order_acquire) : 1.0f,
+		detail ? detail : (terminal == scan_terminal_t::completed ? "Scan completed" :
+			terminal == scan_terminal_t::cancelled ? "Scan cancelled" : "Scan failed"),
+		operation->generation);
 	const std::uint64_t task_id = operation->executor_task_id.load(std::memory_order_acquire);
 	if (task_id == 0)
 		return;
@@ -202,6 +231,11 @@ bool validate_attached_identity(const live_target_identity_t& identity, const ch
 	return false;
 }
 
+}
+
+void set_scan_progress_sink(progress_sink_fn sink) {
+	std::lock_guard<std::mutex> lock(g_progress_sink_mutex);
+	g_progress_sink = std::move(sink);
 }
 
 uint64_t observe_target_binding(uint32_t pid) {
@@ -1017,7 +1051,7 @@ static void first_scan_thread(scan_config_t config,
 	}
 	{
 		std::lock_guard<std::mutex> lk(st.results_mutex);
-		st.results = std::move(all_results);
+		st.results = std::make_shared<const std::vector<scan_result_t>>(std::move(all_results));
 		st.total_found = total;
 		st.has_initial_scan = true;
 		st.scan_count = 1;
@@ -1044,7 +1078,7 @@ static void next_scan_thread(scan_mode_t mode, std::string value_text, std::stri
 	st.scan_progress.store(0.f);
 	auto t_start = std::chrono::steady_clock::now();
 
-	std::vector<scan_result_t> prev;
+	std::shared_ptr<const std::vector<scan_result_t>> prev;
 	value_type_t vtype;
 	bool hex_input;
 	uint32_t target_pid = 0;
@@ -1065,9 +1099,9 @@ static void next_scan_thread(scan_mode_t mode, std::string value_text, std::stri
 	}
 
 	diag::log_tagged_fmt("mem_scanner", "next_scan_thread enter mode=%s prev_count=%zu val='%s' val2='%s' vtype=%s",
-		scan_mode_name(mode), prev.size(), value_text.c_str(), value_text2.c_str(), value_type_name(vtype));
+		scan_mode_name(mode), prev ? prev->size() : 0, value_text.c_str(), value_text2.c_str(), value_type_name(vtype));
 
-	if (prev.empty()) {
+	if (!prev || prev->empty()) {
 		diag::log_tagged("mem_scanner", "next_scan_thread no_prev_results");
 		throw std::runtime_error("The refinement scan has no previous results");
 	}
@@ -1089,8 +1123,8 @@ static void next_scan_thread(scan_mode_t mode, std::string value_text, std::stri
 	if (is_varlen) {
 		if (needs_value && !target_val.empty())
 			val_sz = target_val.size();
-		else if (!prev.empty() && !prev[0].current_value.empty())
-			val_sz = prev[0].current_value.size();
+		else if (!prev->empty() && !(*prev)[0].current_value.empty())
+			val_sz = (*prev)[0].current_value.size();
 	}
 
 	if (val_sz == 0) {
@@ -1116,9 +1150,9 @@ static void next_scan_thread(scan_mode_t mode, std::string value_text, std::stri
 	}
 
 	std::vector<scan_result_t> new_results;
-	new_results.reserve(prev.size());
+	new_results.reserve(prev->size());
 
-	for (size_t i = 0; i < prev.size(); ++i) {
+	for (size_t i = 0; i < prev->size(); ++i) {
 		if (!owns_scan(operation) || !st.scanning.load() ||
 			!target_binding_current(target_pid, target_epoch)) {
 			if (owns_scan(operation))
@@ -1126,7 +1160,7 @@ static void next_scan_thread(scan_mode_t mode, std::string value_text, std::stri
 			break;
 		}
 
-		auto& pr = prev[i];
+		auto& pr = (*prev)[i];
 		std::vector<uint8_t> cur_bytes;
 		if (!driver_bridge::read_memory(pr.address, val_sz, cur_bytes))
 			continue;
@@ -1235,7 +1269,7 @@ static void next_scan_thread(scan_mode_t mode, std::string value_text, std::stri
 		}
 
 		if ((i % 1024) == 0) {
-			const float progress = static_cast<float>(i) / static_cast<float>(prev.size());
+			const float progress = static_cast<float>(i) / static_cast<float>(prev->size());
 			st.scan_progress.store(progress);
 			publish_scan_progress(operation, progress, "Refining scan results");
 		}
@@ -1257,18 +1291,18 @@ static void next_scan_thread(scan_mode_t mode, std::string value_text, std::stri
 		std::lock_guard<std::mutex> lk(st.results_mutex);
 		if (publish_current) {
 			st.total_found = hits;
-			st.results = std::move(new_results);
+			st.results = std::make_shared<const std::vector<scan_result_t>>(std::move(new_results));
 			st.scan_count++;
 		} else if (!st.scan_history.empty()) {
 			st.scan_history.pop_back();
-			hits = st.results.size();
+			hits = results_size(st);
 		}
 	}
 
 	auto t_end = std::chrono::steady_clock::now();
 	uint64_t dur_ms = std::chrono::duration_cast<std::chrono::milliseconds>(t_end - t_start).count();
 	diag::log_tagged_fmt("mem_scanner", "next_scan_thread done prev=%zu hits=%zu duration_ms=%llu scan_count=%d",
-		prev.size(), hits, static_cast<unsigned long long>(dur_ms), g_state.scan_count);
+		prev->size(), hits, static_cast<unsigned long long>(dur_ms), g_state.scan_count);
 
 	st.scan_progress.store(1.f);
 }
@@ -1905,8 +1939,8 @@ void initialize() {
 		std::this_thread::sleep_for(std::chrono::milliseconds(1));
 	{
 		std::lock_guard<std::mutex> lk(st.results_mutex);
-		size_t had = st.results.size();
-		st.results.clear();
+		size_t had = results_size(st);
+		st.results = empty_results_snapshot();
 		st.scan_history.clear();
 		st.total_found = 0;
 		st.has_initial_scan = false;
@@ -2011,7 +2045,7 @@ bool first_scan(const scan_config_t& config) {
 
 	{
 		std::lock_guard<std::mutex> lk(st.results_mutex);
-		st.results.clear();
+		st.results = empty_results_snapshot();
 		st.scan_history.clear();
 		st.total_found = 0;
 		st.has_initial_scan = false;
@@ -2146,7 +2180,7 @@ bool first_static_scan(const scan_config_t& config,
 		value_size = config.value_type == value_type_t::string_utf16 ? 2 : 1;
 	{
 		std::lock_guard<std::mutex> lock(st.results_mutex);
-		st.results.clear();
+		st.results = empty_results_snapshot();
 		st.scan_history.clear();
 		st.total_found = 0;
 		st.has_initial_scan = false;
@@ -2271,7 +2305,7 @@ bool first_static_scan(const scan_config_t& config,
 				g_state.scan_workspace_generation != workspace_generation)
 				throw std::runtime_error("The analysis workspace changed before static scan results could be published");
 			g_state.total_found = results.size();
-			g_state.results = std::move(results);
+			g_state.results = std::make_shared<const std::vector<scan_result_t>>(std::move(results));
 			g_state.has_initial_scan = true;
 			g_state.scan_count = 1;
 		}
@@ -2482,7 +2516,7 @@ void undo_scan() {
 	}
 	st.results = std::move(st.scan_history.back());
 	st.scan_history.pop_back();
-	st.total_found = st.results.size();
+	st.total_found = results_size(st);
 	if (st.scan_count > 0) st.scan_count--;
 	if (st.scan_count == 0) st.has_initial_scan = false;
 	diag::log_tagged_fmt("mem_scanner", "undo_scan restored=%zu scan_count=%d",
@@ -2505,8 +2539,8 @@ void reset_scan() {
 		diag::log_tagged("mem_scanner", "reset_scan recovered stale scan_thread_done=0");
 	}
 	std::lock_guard<std::mutex> lk(st.results_mutex);
-	size_t had = st.results.size();
-	st.results.clear();
+	size_t had = results_size(st);
+	st.results = empty_results_snapshot();
 	st.scan_history.clear();
 	st.total_found = 0;
 	st.has_initial_scan = false;

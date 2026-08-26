@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -34,11 +35,8 @@ struct file_operation_target_t {
     bool directory = false;
 };
 
-void render_start_center();
 void render_project_explorer();
 void render_workspace_search();
-void render_sessions();
-void render_recent();
 bool can_restore_previous_session();
 bool request_restore_previous_session();
 file_operation_capability_t file_operation_capability(file_operation_t operation,
@@ -49,6 +47,10 @@ file_operation_capability_t file_operation_capability(file_operation_t operation
     const std::vector<file_operation_target_t>& targets);
 file_operation_result_t request_file_operation(file_operation_t operation,
     const std::vector<file_operation_target_t>& targets);
+file_operation_result_t submit_confirmed_file_operation(file_operation_t operation,
+    std::filesystem::path source, std::filesystem::path destination, bool source_directory);
+file_operation_result_t submit_confirmed_batch_file_operation(file_operation_t operation,
+    std::vector<file_operation_target_t> targets);
 file_operation_result_t request_search_scope(const std::string& path, bool directory);
 void render_global_file_operation_dialogs();
 

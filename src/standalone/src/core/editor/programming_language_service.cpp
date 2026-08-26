@@ -1,8 +1,9 @@
 #include "programming_language_service.hpp"
 
 #include "code_editor.hpp"
+#include "../ai/standalone_chat.hpp"
 #include "../infra/executor.hpp"
-#include "../ui/application_view_registry.hpp"
+#include "../ui/application_ui_runtime.hpp"
 #include "../ui/task_center.hpp"
 #include "../ui/ui_thread_dispatcher.hpp"
 #include "../settings/standalone_settings.hpp"
@@ -1657,8 +1658,8 @@ bool open_location(const location_t& location, bool open_to_side)
         return false;
     if (open_to_side && file_tabs::create_group_for_tab(file_tabs::active_tab) == 0)
         return false;
-    static_cast<void>(ui::application_views::open_or_focus(
-        ui::stable_view_id_t("document.code")));
+    static_cast<void>(ui::application_ui::execute_action("view.focus.document.code",
+        ui::action_invocation_source_t::command_palette));
     return true;
 }
 
@@ -1672,9 +1673,9 @@ bool send_location_to_ai(const location_t& location, std::string_view provenance
         << resolved_path << ':' << location.line << ':' << location.column << '\n';
     if (!location.preview.empty())
         payload << location.preview.substr(0, 2048);
-    chat_inject::post(payload.str());
-    static_cast<void>(ui::application_views::open_or_focus(
-        ui::stable_view_id_t("view.ai_chat")));
+    aida::automation_ui::post_chat_inject(payload.str());
+    static_cast<void>(ui::application_ui::execute_action("view.focus.view.ai_chat",
+        ui::action_invocation_source_t::command_palette));
     return true;
 }
 

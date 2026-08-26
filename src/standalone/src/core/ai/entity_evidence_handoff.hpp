@@ -2,7 +2,7 @@
 
 #include "standalone_chat.hpp"
 #include "../ui/application_ui_runtime.hpp"
-#include "../ui/application_view_registry.hpp"
+#include "../ui/application_ui_runtime.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -157,10 +157,10 @@ inline ui::action_handler_result_t dispatch(snapshot_t snapshot,
         register_evidence_source_return(evidence_id,
             std::move(snapshot.return_to_source));
     if (destination == destination_t::review) {
-        const auto opened = ui::application_views::open_or_focus(
-            ui::stable_view_id_t("view.ai.evidence"));
-        return opened.ok() ? ui::action_handler_result_t::completed()
-            : ui::action_handler_result_t::failed(opened.detail);
+        const auto opened = ui::application_ui::execute_action("view.focus.view.ai.evidence",
+            ui::action_invocation_source_t::command_palette);
+        return opened.executed() ? ui::action_handler_result_t::completed()
+            : ui::action_handler_result_t::failed(opened.message);
     }
     std::string reason;
     const bool queued = destination == destination_t::agent

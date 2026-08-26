@@ -649,12 +649,8 @@ void start_run(const std::shared_ptr<decompile_batch_orchestrator_t::state_t>& s
     const std::uint64_t snapshot_bytes = context_bytes && context_bytes->snapshot()
         ? context_bytes->snapshot()->size() : 0;
     const auto& quotas = mcp_standalone::downstream::governor_t::instance().quotas();
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
     const std::uint32_t fabric_capacity =
         aida::infra::taskflow_runtime::analysis_compute_capacity();
-#else
-    const std::uint32_t fabric_capacity = (std::max)(2u, std::thread::hardware_concurrency());
-#endif
     const std::size_t slots_desired = (std::max<std::size_t>)(2,
         (std::min<std::size_t>)(k_absolute_slot_cap,
             static_cast<std::size_t>(fabric_capacity >= 3 ? fabric_capacity - 1 : 2)));

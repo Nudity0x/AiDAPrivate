@@ -102,7 +102,8 @@ std::vector<package_info_t> get_search_results();
 void install_async(const package_info_t& pkg);
 
 
-bool uninstall(const std::string& package_name);
+using install_output_hook_t = std::function<void(const std::string& line)>;
+void set_install_output_hook(install_output_hook_t hook);
 
 
 install_state_t get_install_state();

@@ -1,7 +1,6 @@
 #include "test_lab.hpp"
 #include "test_lab_format.hpp"
 #include "../../../../driver/comm.h"
-#include "imgui/imgui.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -190,9 +189,9 @@ namespace {
 		std::memcpy(r.raw.data(), ptr, sz);
 	}
 
-	void render_inputs_dtb(test_lab::state_t& s) {
-		ImGui::InputScalar("PID", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		ImGui::TextDisabled("Resolves CR3 (DirectoryTableBase) for the given process.");
+	void render_inputs_dtb(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("PID", &s.pid, false);
+		form.note("Resolves CR3 (DirectoryTableBase) for the given process.");
 	}
 
 	void run_dtb(test_lab::state_t& s, test_lab::result_t& r) {
@@ -215,12 +214,12 @@ namespace {
 		}
 	}
 
-	void render_inputs_phys(test_lab::state_t& s) {
-		ImGui::InputScalar("PID", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		ImGui::InputScalar("DTB (CR3, u64_a)", ImGuiDataType_U64, &s.u64_a, nullptr, nullptr, "0x%016llX", ImGuiInputTextFlags_CharsHexadecimal);
-		ImGui::InputScalar("Virtual address", ImGuiDataType_U64, &s.addr, nullptr, nullptr, "0x%016llX", ImGuiInputTextFlags_CharsHexadecimal);
-		ImGui::InputScalar("Size (bytes, capped 4096)", ImGuiDataType_U32, &s.size, nullptr, nullptr, "%u");
-		ImGui::TextDisabled("Reads memory via VA->phys translation using the provided DTB.");
+	void render_inputs_phys(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("PID", &s.pid, false);
+		form.u64("DTB (CR3, u64_a)", &s.u64_a, true);
+		form.u64("Virtual address", &s.addr, true);
+		form.u32("Size (bytes, capped 4096)", &s.size, false);
+		form.note("Reads memory via VA->phys translation using the provided DTB.");
 	}
 
 	void run_phys(test_lab::state_t& s, test_lab::result_t& r) {
@@ -261,14 +260,10 @@ namespace {
 		}
 	}
 
-	void render_inputs_base(test_lab::state_t& s) {
-		ImGui::InputScalar("PID", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		char mod_name[260];
-		std::snprintf(mod_name, sizeof(mod_name), "%s", s.text_a.c_str());
-		if (ImGui::InputText("Module name (informational)", mod_name, sizeof(mod_name))) {
-			s.text_a = mod_name;
-		}
-		ImGui::TextDisabled("Returns PsGetProcessSectionBaseAddress for the PID. Module name is informational only (kernel returns the EXE base).");
+	void render_inputs_base(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("PID", &s.pid, false);
+		form.text("Module name (informational)", &s.text_a, 260);
+		form.note("Returns PsGetProcessSectionBaseAddress for the PID. Module name is informational only (kernel returns the EXE base).");
 	}
 
 	void run_base(test_lab::state_t& s, test_lab::result_t& r) {
@@ -296,11 +291,11 @@ namespace {
 		}
 	}
 
-	void render_inputs_am(test_lab::state_t& s) {
-		ImGui::InputScalar("PID", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		ImGui::InputScalar("Size (bytes)", ImGuiDataType_U32, &s.size, nullptr, nullptr, "%u");
-		ImGui::InputScalar("Protect flags (informational, u32_a)", ImGuiDataType_U32, &s.u32_a, nullptr, nullptr, "0x%08X", ImGuiInputTextFlags_CharsHexadecimal);
-		ImGui::TextDisabled("Allocates page-aligned RWX memory in the target process. Kernel forces PAGE_EXECUTE_READWRITE; protect flag is informational.");
+	void render_inputs_am(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("PID", &s.pid, false);
+		form.u32("Size (bytes)", &s.size, false);
+		form.u32("Protect flags (informational, u32_a)", &s.u32_a, true);
+		form.note("Allocates page-aligned RWX memory in the target process. Kernel forces PAGE_EXECUTE_READWRITE; protect flag is informational.");
 	}
 
 	void run_am(test_lab::state_t& s, test_lab::result_t& r) {
@@ -328,11 +323,11 @@ namespace {
 		}
 	}
 
-	void render_inputs_fm(test_lab::state_t& s) {
-		ImGui::InputScalar("PID", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		ImGui::InputScalar("Address", ImGuiDataType_U64, &s.addr, nullptr, nullptr, "0x%016llX", ImGuiInputTextFlags_CharsHexadecimal);
-		ImGui::InputScalar("Size (informational)", ImGuiDataType_U32, &s.size, nullptr, nullptr, "%u");
-		ImGui::TextDisabled("Frees the entire reserved region at the given address (MEM_RELEASE). Size is informational only.");
+	void render_inputs_fm(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("PID", &s.pid, false);
+		form.u64("Address", &s.addr, true);
+		form.u32("Size (informational)", &s.size, false);
+		form.note("Frees the entire reserved region at the given address (MEM_RELEASE). Size is informational only.");
 	}
 
 	void run_fm(test_lab::state_t& s, test_lab::result_t& r) {
@@ -355,10 +350,10 @@ namespace {
 		r.ok = true;
 	}
 
-	void render_inputs_qm(test_lab::state_t& s) {
-		ImGui::InputScalar("PID", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		ImGui::InputScalar("Address", ImGuiDataType_U64, &s.addr, nullptr, nullptr, "0x%016llX", ImGuiInputTextFlags_CharsHexadecimal);
-		ImGui::TextDisabled("ZwQueryVirtualMemory(MemoryBasicInformation) on the target process.");
+	void render_inputs_qm(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("PID", &s.pid, false);
+		form.u64("Address", &s.addr, true);
+		form.note("ZwQueryVirtualMemory(MemoryBasicInformation) on the target process.");
 	}
 
 	void run_qm(test_lab::state_t& s, test_lab::result_t& r) {
@@ -385,12 +380,12 @@ namespace {
 		r.ok = true;
 	}
 
-	void render_inputs_pm(test_lab::state_t& s) {
-		ImGui::InputScalar("PID", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		ImGui::InputScalar("Address", ImGuiDataType_U64, &s.addr, nullptr, nullptr, "0x%016llX", ImGuiInputTextFlags_CharsHexadecimal);
-		ImGui::InputScalar("Size (bytes)", ImGuiDataType_U32, &s.size, nullptr, nullptr, "%u");
-		ImGui::InputScalar("New protect (u32_a)", ImGuiDataType_U32, &s.u32_a, nullptr, nullptr, "0x%08X", ImGuiInputTextFlags_CharsHexadecimal);
-		ImGui::TextDisabled("Calls ZwProtectVirtualMemory on the target process. Typical protect: 0x20=RX, 0x40=RWX, 0x04=RW, 0x02=R.");
+	void render_inputs_pm(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("PID", &s.pid, false);
+		form.u64("Address", &s.addr, true);
+		form.u32("Size (bytes)", &s.size, false);
+		form.u32("New protect (u32_a)", &s.u32_a, true);
+		form.note("Calls ZwProtectVirtualMemory on the target process. Typical protect: 0x20=RX, 0x40=RWX, 0x04=RW, 0x02=R.");
 	}
 
 	void run_pm(test_lab::state_t& s, test_lab::result_t& r) {
@@ -438,15 +433,12 @@ namespace {
 		r.ok = true;
 	}
 
-	void render_inputs_er(test_lab::state_t& s) {
-		ImGui::InputScalar("PID", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		ImGui::InputScalar("Start address (0 = scan from 0)", ImGuiDataType_U64, &s.addr, nullptr, nullptr, "0x%016llX", ImGuiInputTextFlags_CharsHexadecimal);
-		ImGui::InputScalar("Max address (0 = full user range)", ImGuiDataType_U64, &s.u64_a, nullptr, nullptr, "0x%016llX", ImGuiInputTextFlags_CharsHexadecimal);
-		bool include_all = (s.u32_a != 0);
-		if (ImGui::Checkbox("Include all regions (not only MEM_COMMIT)", &include_all)) {
-			s.u32_a = include_all ? 1u : 0u;
-		}
-		ImGui::TextDisabled("Enumerates committed memory regions for the target PID (up to 4096 entries).");
+	void render_inputs_er(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("PID", &s.pid, false);
+		form.u64("Start address (0 = scan from 0)", &s.addr, true);
+		form.u64("Max address (0 = full user range)", &s.u64_a, true);
+		form.checkbox_u32("Include all regions (not only MEM_COMMIT)", &s.u32_a, 1u, 0u);
+		form.note("Enumerates committed memory regions for the target PID (up to 4096 entries).");
 	}
 
 	void run_er(test_lab::state_t& s, test_lab::result_t& r) {
@@ -497,9 +489,9 @@ namespace {
 		r.ok = true;
 	}
 
-	void render_inputs_rpeb(test_lab::state_t& s) {
-		ImGui::InputScalar("PID", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		ImGui::TextDisabled("Reads PEB fields: image_base, BeingDebugged, NtGlobalFlag, Ldr, ProcessHeap, NumberOfHeaps, ProcessHeaps.");
+	void render_inputs_rpeb(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("PID", &s.pid, false);
+		form.note("Reads PEB fields: image_base, BeingDebugged, NtGlobalFlag, Ldr, ProcessHeap, NumberOfHeaps, ProcessHeaps.");
 	}
 
 	void run_rpeb(test_lab::state_t& s, test_lab::result_t& r) {
@@ -530,10 +522,10 @@ namespace {
 		}
 	}
 
-	void render_inputs_sdf(test_lab::state_t& s) {
-		ImGui::InputScalar("PID", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		ImGui::InputScalar("Expected clear mask (u32_a, 0 = PEB bits)", ImGuiDataType_U32, &s.u32_a, nullptr, nullptr, "0x%08X", ImGuiInputTextFlags_CharsHexadecimal);
-		ImGui::TextDisabled("Clears EPROCESS.DebugPort, PEB.BeingDebugged, and the heap-debug bits in PEB.NtGlobalFlag. Kernel reports which fields it actually cleared.");
+	void render_inputs_sdf(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("PID", &s.pid, false);
+		form.u32("Expected clear mask (u32_a, 0 = PEB bits)", &s.u32_a, true);
+		form.note("Clears EPROCESS.DebugPort, PEB.BeingDebugged, and the heap-debug bits in PEB.NtGlobalFlag. Kernel reports which fields it actually cleared.");
 	}
 
 	void run_sdf(test_lab::state_t& s, test_lab::result_t& r) {
@@ -583,20 +575,12 @@ namespace {
 		}
 	}
 
-	void render_inputs_mex(test_lab::state_t& s) {
-		ImGui::InputScalar("DTB (CR3, u64_a)", ImGuiDataType_U64, &s.u64_a, nullptr, nullptr, "0x%016llX", ImGuiInputTextFlags_CharsHexadecimal);
-		ImGui::InputScalar("Module base (addr)", ImGuiDataType_U64, &s.addr, nullptr, nullptr, "0x%016llX", ImGuiInputTextFlags_CharsHexadecimal);
-		char mod_buf[260];
-		std::snprintf(mod_buf, sizeof(mod_buf), "%s", s.text_a.c_str());
-		if (ImGui::InputText("Module name (informational)", mod_buf, sizeof(mod_buf))) {
-			s.text_a = mod_buf;
-		}
-		char exp_buf[128];
-		std::snprintf(exp_buf, sizeof(exp_buf), "%s", s.text_b.c_str());
-		if (ImGui::InputText("Export name", exp_buf, sizeof(exp_buf))) {
-			s.text_b = exp_buf;
-		}
-		ImGui::TextDisabled("Resolves an export by name within a PE image. Kernel needs DTB (use the DTB feature first) and module base address.");
+	void render_inputs_mex(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u64("DTB (CR3, u64_a)", &s.u64_a, true);
+		form.u64("Module base (addr)", &s.addr, true);
+		form.text("Module name (informational)", &s.text_a, 260);
+		form.text("Export name", &s.text_b, 128);
+		form.note("Resolves an export by name within a PE image. Kernel needs DTB (use the DTB feature first) and module base address.");
 	}
 
 	void run_mex(test_lab::state_t& s, test_lab::result_t& r) {
@@ -632,10 +616,10 @@ namespace {
 		}
 	}
 
-	void render_inputs_v2p(test_lab::state_t& s) {
-		ImGui::InputScalar("DTB (CR3, u64_a)", ImGuiDataType_U64, &s.u64_a, nullptr, nullptr, "0x%016llX", ImGuiInputTextFlags_CharsHexadecimal);
-		ImGui::InputScalar("Virtual address", ImGuiDataType_U64, &s.addr, nullptr, nullptr, "0x%016llX", ImGuiInputTextFlags_CharsHexadecimal);
-		ImGui::TextDisabled("Walks the page tables for the given DTB and translates VA -> physical address.");
+	void render_inputs_v2p(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u64("DTB (CR3, u64_a)", &s.u64_a, true);
+		form.u64("Virtual address", &s.addr, true);
+		form.note("Walks the page tables for the given DTB and translates VA -> physical address.");
 	}
 
 	void run_v2p(test_lab::state_t& s, test_lab::result_t& r) {

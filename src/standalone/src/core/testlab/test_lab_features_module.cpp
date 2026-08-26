@@ -4,7 +4,6 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include "../../../../driver/comm.h"
-#include "imgui/imgui.h"
 
 #pragma comment(lib, "ws2_32.lib")
 
@@ -257,26 +256,18 @@ namespace {
 		return ok;
 	}
 
-	void render_inputs_pmod(test_lab::state_t& s) {
+	void render_inputs_pmod(test_lab::state_t& s, test_lab::input_form_t& form) {
 		static const char* items[] = {
 			"0 add rule (single)",
 			"1 delete rule by id (single)",
 			"2 list rules (bulk)",
 		};
-		int current = static_cast<int>(s.u32_a);
-		if (current < 0 || current >= static_cast<int>(sizeof(items) / sizeof(items[0]))) current = 0;
-		if (ImGui::Combo("Operation", &current, items, static_cast<int>(sizeof(items) / sizeof(items[0])))) {
-			s.u32_a = static_cast<std::uint32_t>(current);
-		}
-		ImGui::TextDisabled("Rule format (add): rule_id|direction|protocol|port|pid|pattern_hex|replacement_hex");
-		ImGui::TextDisabled("Rule format (del): rule_id");
-		ImGui::TextDisabled("List op ignores the rule string.");
+		form.combo("Operation", &s.u32_a, items, sizeof(items) / sizeof(items[0]));
+		form.note("Rule format (add): rule_id|direction|protocol|port|pid|pattern_hex|replacement_hex");
+		form.note("Rule format (del): rule_id");
+		form.note("List op ignores the rule string.");
 		if (s.text_a.size() < 1) s.text_a.reserve(96);
-		char buf[256];
-		std::snprintf(buf, sizeof(buf), "%s", s.text_a.c_str());
-		if (ImGui::InputText("Rule string", buf, sizeof(buf))) {
-			s.text_a = buf;
-		}
+		form.text("Rule string", &s.text_a, 256);
 	}
 
 	bool parse_rule_string_for_add(const std::string& src, voyager::detail::packet_mod_rule& out) {
@@ -451,30 +442,22 @@ namespace {
 		}
 	}
 
-	void render_inputs_pinj(test_lab::state_t& s) {
+	void render_inputs_pinj(test_lab::state_t& s, test_lab::input_form_t& form) {
 		static const char* dir_items[] = {
 			"0 outbound (send)",
 			"1 inbound (recv)",
 		};
-		int dir = static_cast<int>(s.u32_a);
-		if (dir < 0 || dir >= static_cast<int>(sizeof(dir_items) / sizeof(dir_items[0]))) dir = 0;
-		if (ImGui::Combo("Direction", &dir, dir_items, static_cast<int>(sizeof(dir_items) / sizeof(dir_items[0])))) {
-			s.u32_a = static_cast<std::uint32_t>(dir);
-		}
-		static int s_proto_choice = 6;
-		ImGui::InputInt("Protocol (6=TCP, 17=UDP, 1=ICMP)", &s_proto_choice);
-		if (s_proto_choice < 0) s_proto_choice = 0;
-		s.u32_b = static_cast<std::uint32_t>(s_proto_choice);
-		ImGui::InputScalar("src port", ImGuiDataType_U32, &s.size, nullptr, nullptr, "%u");
-		ImGui::InputScalar("dst port", ImGuiDataType_U32, &s.tid, nullptr, nullptr, "%u");
-		ImGui::TextDisabled("src_addr / dst_addr default to 127.0.0.1, address_family=AF_INET.");
-		ImGui::TextDisabled("Payload: paste raw hex bytes (\"DEADBEEF...\"). Capped at INJECT_MAX_PAYLOAD = %u.",
+		form.combo("Direction", &s.u32_a, dir_items, sizeof(dir_items) / sizeof(dir_items[0]));
+		form.u32("Protocol (6=TCP, 17=UDP, 1=ICMP)", &s.u32_b, false);
+		form.u32("src port", &s.size, false);
+		form.u32("dst port", &s.tid, false);
+		form.note("src_addr / dst_addr default to 127.0.0.1, address_family=AF_INET.");
+		char note_buf[128];
+		std::snprintf(note_buf, sizeof(note_buf),
+			"Payload: paste raw hex bytes (\"DEADBEEF...\"). Capped at INJECT_MAX_PAYLOAD = %u.",
 			voyager::detail::INJECT_MAX_PAYLOAD);
-		char buf[1024];
-		std::snprintf(buf, sizeof(buf), "%s", s.text_a.c_str());
-		if (ImGui::InputText("Payload hex", buf, sizeof(buf))) {
-			s.text_a = buf;
-		}
+		form.note(note_buf);
+		form.text("Payload hex", &s.text_a, 1024);
 	}
 
 	void run_pinj(test_lab::state_t& s, test_lab::result_t& r) {
@@ -523,16 +506,16 @@ namespace {
 		r.ok = true;
 	}
 
-	void render_inputs_dpin(test_lab::state_t& s) {
-		ImGui::InputScalar("PID filter (0 = any)", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		static int s_proto = 0;
-		ImGui::InputInt("Protocol filter (0=any, 6=TCP, 17=UDP, 1=ICMP)", &s_proto);
-		if (s_proto < 0) s_proto = 0;
-		s.u32_a = static_cast<std::uint32_t>(s_proto);
-		ImGui::InputScalar("Port filter (0 = any)", ImGuiDataType_U32, &s.size, nullptr, nullptr, "%u");
-		ImGui::InputScalar("Flags", ImGuiDataType_U32, &s.u32_b, nullptr, nullptr, "%u");
-		ImGui::TextDisabled("Driver returns up to DPI_MAX_RESULTS = %u header records.",
+	void render_inputs_dpin(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("PID filter (0 = any)", &s.pid, false);
+		form.u32("Protocol filter (0=any, 6=TCP, 17=UDP, 1=ICMP)", &s.u32_a, false);
+		form.u32("Port filter (0 = any)", &s.size, false);
+		form.u32("Flags", &s.u32_b, false);
+		char note_buf[128];
+		std::snprintf(note_buf, sizeof(note_buf),
+			"Driver returns up to DPI_MAX_RESULTS = %u header records.",
 			voyager::detail::DPI_MAX_RESULTS);
+		form.note(note_buf);
 	}
 
 	void run_dpin(test_lab::state_t& s, test_lab::result_t& r) {
@@ -715,7 +698,7 @@ namespace {
 		}
 	}
 
-	void render_inputs_ihld(test_lab::state_t& s) {
+	void render_inputs_ihld(test_lab::state_t& s, test_lab::input_form_t& form) {
 		static const char* items[] = {
 			"0 start intercept",
 			"1 stop intercept",
@@ -724,22 +707,17 @@ namespace {
 			"4 drop (needs hold_id)",
 			"5 modify + release (needs hold_id, payload via text_a)",
 		};
-		int current = static_cast<int>(s.u32_a);
-		if (current < 0 || current >= static_cast<int>(sizeof(items) / sizeof(items[0]))) current = 0;
-		if (ImGui::Combo("Operation", &current, items, static_cast<int>(sizeof(items) / sizeof(items[0])))) {
-			s.u32_a = static_cast<std::uint32_t>(current);
-		}
-		ImGui::InputScalar("hold_id", ImGuiDataType_U64, &s.u64_a, nullptr, nullptr, "%llu");
-		ImGui::InputScalar("filter pid (op 0)", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		ImGui::InputScalar("filter port (op 0)", ImGuiDataType_U32, &s.size, nullptr, nullptr, "%u");
-		ImGui::InputScalar("filter protocol (op 0)", ImGuiDataType_U32, &s.u32_b, nullptr, nullptr, "%u");
-		ImGui::TextDisabled("Modify payload (op 5): hex bytes; capped at INTERCEPT_MAX_PAYLOAD = %u.",
+		form.combo("Operation", &s.u32_a, items, sizeof(items) / sizeof(items[0]));
+		form.u64("hold_id", &s.u64_a, false);
+		form.u32("filter pid (op 0)", &s.pid, false);
+		form.u32("filter port (op 0)", &s.size, false);
+		form.u32("filter protocol (op 0)", &s.u32_b, false);
+		char note_buf[128];
+		std::snprintf(note_buf, sizeof(note_buf),
+			"Modify payload (op 5): hex bytes; capped at INTERCEPT_MAX_PAYLOAD = %u.",
 			voyager::detail::INTERCEPT_MAX_PAYLOAD);
-		char buf[1024];
-		std::snprintf(buf, sizeof(buf), "%s", s.text_a.c_str());
-		if (ImGui::InputText("Modify payload hex", buf, sizeof(buf))) {
-			s.text_a = buf;
-		}
+		form.note(note_buf);
+		form.text("Modify payload hex", &s.text_a, 1024);
 	}
 
 	void run_ihld(test_lab::state_t& s, test_lab::result_t& r) {

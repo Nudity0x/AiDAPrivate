@@ -36,7 +36,7 @@ MINIMUM_KIND_COUNTS = {
     "shortcut": 12,
 }
 EXPECTED_DIALOG_COUNT = 82
-EXPECTED_CATALOG_DESCRIPTOR_COUNT = 117
+EXPECTED_CATALOG_DESCRIPTOR_COUNT = 120
 EXPECTED_DYNAMIC_DESCRIPTOR_COUNT = 2
 REQUIRED_IDS = {
     "document.code", "document.disassembly", "document.hex", "document.pseudocode",
@@ -63,53 +63,17 @@ DEBUG_IDS = {
 }
 FORBIDDEN_PATH_PARTS = ("testlab", "plugin_plans", "/plugin/", "/server/", "/driver/")
 ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]+$")
-REGISTRY_SOURCE = ROOT / "src" / "standalone" / "src" / "core" / "ui" / "application_view_registry.cpp"
+REGISTRY_SOURCE = ROOT / "src" / "standalone" / "src" / "qt" / "registry" / "view_catalog.hpp"
+REGISTRY_BINDINGS_SOURCE = ROOT / "src" / "standalone" / "src" / "qt" / "registry" / "qt_view_registry.cpp"
 DYNAMIC_VIEW_SOURCES = {
-    "view.background_tasks": (
-        ROOT / "src" / "standalone" / "src" / "core" / "ui" / "task_center.cpp",
-        "tasks.render = render_tasks_view",
-    ),
-    "view.diagnostics": (
-        ROOT / "src" / "standalone" / "src" / "core" / "ui" / "task_center.cpp",
-        "diagnostics.render = render_diagnostics_view",
-    ),
+    "view.background_tasks": "task_center",
+    "view.diagnostics": "task_center",
 }
 RAW_MODAL_OWNERS = {}
 
 
 def fail(errors: list[str], message: str) -> None:
     errors.append(message)
-
-
-def preview_active_catalog(catalog: str, errors: list[str]) -> str:
-    active_lines: list[str] = []
-    excluded_depth = 0
-    excluded_blocks = 0
-    guard = re.compile(r"#if\s+!defined\(AIDA_IMGUI_STUDIO_PREVIEW\)")
-    nested_guard = re.compile(r"#(?:if|ifdef|ifndef)\b")
-    alternate_branch = re.compile(r"#(?:else|elif)\b")
-    for line in catalog.splitlines(keepends=True):
-        directive = line.strip()
-        if excluded_depth == 0:
-            if guard.fullmatch(directive):
-                excluded_depth = 1
-                excluded_blocks += 1
-            else:
-                active_lines.append(line)
-            continue
-        if nested_guard.match(directive):
-            excluded_depth += 1
-        elif directive == "#endif":
-            excluded_depth -= 1
-        elif excluded_depth == 1 and alternate_branch.match(directive):
-            fail(errors, "preview-excluded registry guard contains an unsupported alternate branch")
-            return catalog
-    if excluded_depth != 0:
-        fail(errors, "preview-excluded registry guard is unterminated")
-        return catalog
-    if excluded_blocks != 1:
-        fail(errors, f"expected one preview-excluded registry block, found {excluded_blocks}")
-    return "".join(active_lines)
 
 
 def validate_registry_coverage(target_ids: set[str], errors: list[str]) -> None:
@@ -119,36 +83,53 @@ def validate_registry_coverage(target_ids: set[str], errors: list[str]) -> None:
         fail(errors, f"canonical view registry unreadable: {exc}")
         return
     catalog_start = source.find("constexpr catalog_entry_t k_catalog[]")
-    catalog_end = source.find("#undef AIDA_VIEW", catalog_start)
+    catalog_end = source.find("#undef AIDA_QT_VIEW", catalog_start)
     if catalog_start < 0 or catalog_end < 0:
         fail(errors, "canonical view registry catalog boundary is missing")
         return
-    catalog = preview_active_catalog(source[catalog_start:catalog_end], errors)
-    entries: dict[str, tuple[str, str, str]] = {}
-    for macro_match in re.finditer(
-        r'\b(AIDA_VIEW|AIDA_DEBUG_VIEW|AIDA_NETWORK_VIEW)\(\s*"([a-z0-9._-]+)"',
+    catalog = source[catalog_start:catalog_end]
+    entries: dict[str, tuple[str, str, str, str, str]] = {}
+    for row_match in re.finditer(
+        r'\b(AIDA_QT_VIEW|AIDA_QT_DEBUG_VIEW|AIDA_QT_NETWORK_VIEW)\(\s*"([a-z0-9._-]+)"'
+        r'|\{\s*"([a-z0-9._-]+)"\s*,\s*"(?:\\.|[^"\\])*"\s*,\s*view_category_t::',
         catalog,
     ):
-        macro, view_id = macro_match.groups()
+        macro = row_match.group(1) or ""
+        view_id = row_match.group(2) or row_match.group(3)
         if view_id in entries:
             fail(errors, f"duplicate canonical registry view {view_id}")
             continue
-        category = ""
-        subview = ""
-        if macro == "AIDA_VIEW":
-            line_start = catalog.rfind("\n", 0, macro_match.start()) + 1
-            line_end = catalog.find("\n", macro_match.end())
-            line = catalog[line_start:line_end if line_end >= 0 else len(catalog)]
+        line_start = catalog.rfind("\n", 0, row_match.start()) + 1
+        line_end = catalog.find("\n", row_match.end())
+        line = catalog[line_start:line_end if line_end >= 0 else len(catalog)]
+        category = role = owner = hub = ""
+        if macro == "AIDA_QT_VIEW":
             route_match = re.search(
-                r'AIDA_VIEW\(\s*"[^"]+"\s*,\s*"[^"]*"\s*,\s*([a-z_]+)\s*,\s*'
-                r'[a-z_]+\s*,\s*[a-z_]+\s*,\s*([a-z_]+)\s*,',
+                r'AIDA_QT_VIEW\(\s*"[^"]+"\s*,\s*"[^"]*"\s*,\s*([a-z_]+)\s*,\s*'
+                r'([a-z_]+)\s*,\s*([a-z_]+)\s*,\s*([a-z_]+)\s*,',
                 line,
             )
             if not route_match:
                 fail(errors, f"canonical registry entry is not statically parseable: {view_id}")
                 continue
-            category, subview = route_match.groups()
-        entries[view_id] = (macro, category, subview)
+            category, role, owner, hub = route_match.groups()
+        elif macro:
+            category, role, owner, hub = {
+                "AIDA_QT_DEBUG_VIEW": ("debugger", "tool_window", "registry", "debugger"),
+                "AIDA_QT_NETWORK_VIEW": ("network", "tool_window", "registry", "network"),
+            }[macro]
+        else:
+            raw_match = re.search(
+                r'\{\s*"[a-z0-9._-]+"\s*,\s*"(?:\\.|[^"\\])*"\s*,\s*view_category_t::([a-z_]+)\s*,\s*'
+                r'view_presentation_role_t::([a-z_]+)\s*,\s*catalog_owner_t::([a-z_]+)\s*,\s*'
+                r'hub_kind_t::([a-z_]+)\s*,',
+                line,
+            )
+            if not raw_match:
+                fail(errors, f"canonical registry entry is not statically parseable: {view_id}")
+                continue
+            category, role, owner, hub = raw_match.groups()
+        entries[view_id] = (macro or "RAW", category, role, owner, hub)
     if not entries:
         fail(errors, "canonical view registry catalog contains no parsed views")
         return
@@ -157,39 +138,28 @@ def validate_registry_coverage(target_ids: set[str], errors: list[str]) -> None:
     if len(DYNAMIC_VIEW_SOURCES) != EXPECTED_DYNAMIC_DESCRIPTOR_COUNT:
         fail(errors, f"dynamic registry has {len(DYNAMIC_VIEW_SOURCES)} descriptors, expected {EXPECTED_DYNAMIC_DESCRIPTOR_COUNT}")
 
-    generic_routes = {
-        ("analysis", "analysis"): "analysis_hub_view::render_subview",
-        ("memory", "scan"): "scan_hub_view::render_subview",
-        ("types", "types"): "types_hub_view::render_subview",
-        ("debugger", "debugger"): "debugger_view::render_pane",
-        ("network", "network"): "network_view::render_pane",
-    }
-    for view_id, (macro, category, subview) in sorted(entries.items()):
+    for machinery in ("find_catalog_entry", "k_catalog_size"):
+        if machinery not in source:
+            fail(errors, f"Qt view catalog machinery missing: {machinery}")
+    try:
+        bindings_source = REGISTRY_BINDINGS_SOURCE.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as exc:
+        fail(errors, f"Qt view registry bindings unreadable: {exc}")
+        bindings_source = ""
+    for binding in ("register_catalog", "install_view_factory"):
+        if binding not in bindings_source:
+            fail(errors, f"Qt view registry binding missing: {binding}")
+
+    for view_id in sorted(entries):
         if view_id not in target_ids:
             fail(errors, f"canonical registry view lacks inventory target coverage: {view_id}")
-        if macro == "AIDA_DEBUG_VIEW":
-            category, subview = "debugger", "debugger"
-        elif macro == "AIDA_NETWORK_VIEW":
-            category, subview = "network", "network"
-        generic_symbol = generic_routes.get((category, subview))
-        if generic_symbol:
-            if generic_symbol not in source:
-                fail(errors, f"canonical registry route missing for {view_id}: {generic_symbol}")
-            continue
-        dispatch = f'std::strcmp(entry.id, "{view_id}")'
-        if dispatch not in source:
-            fail(errors, f"canonical registry view has no render dispatch: {view_id}")
 
-    for view_id, (owner, render_binding) in DYNAMIC_VIEW_SOURCES.items():
+    for view_id, expected_owner in DYNAMIC_VIEW_SOURCES.items():
         if view_id not in target_ids:
             fail(errors, f"dynamic registry view lacks inventory target coverage: {view_id}")
-        try:
-            owner_source = owner.read_text(encoding="utf-8")
-        except (OSError, UnicodeError) as exc:
-            fail(errors, f"dynamic registry owner unreadable for {view_id}: {exc}")
-            continue
-        if f'stable_view_id_t("{view_id}")' not in owner_source or render_binding not in owner_source:
-            fail(errors, f"dynamic registry view has no exact render binding: {view_id}")
+        entry = entries.get(view_id)
+        if entry is None or entry[3] != expected_owner:
+            fail(errors, f"dynamic registry view is not {expected_owner}-owned in the Qt catalog: {view_id}")
 
 
 def main() -> int:
@@ -349,7 +319,7 @@ def main() -> int:
         return 1
     category_summary = ",".join(f"{key}:{counts[key]}" for key in sorted(counts))
     print(f"PASS rows={len(inventory)} stable_ids={len(stable_ids)} target_ids={len(target_ids)}")
-    print(f"DESCRIPTORS catalog={EXPECTED_CATALOG_DESCRIPTOR_COUNT} dynamic={EXPECTED_DYNAMIC_DESCRIPTOR_COUNT} total={EXPECTED_CATALOG_DESCRIPTOR_COUNT + EXPECTED_DYNAMIC_DESCRIPTOR_COUNT}")
+    print(f"DESCRIPTORS catalog={EXPECTED_CATALOG_DESCRIPTOR_COUNT} task_center_owned={EXPECTED_DYNAMIC_DESCRIPTOR_COUNT} total={EXPECTED_CATALOG_DESCRIPTOR_COUNT}")
     print(f"CATEGORIES {category_summary}")
     print(f"WORKSPACES {','.join(sorted(workspaces))}")
     return 0

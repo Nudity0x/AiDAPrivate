@@ -1,17 +1,15 @@
 #pragma once
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-#include "../../preview/scan_pointer_preview.hpp"
-#else
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <functional>
 #include <map>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -849,6 +847,46 @@ inline void clear_map()
 	diag::log_tagged_fmt("pointer_scan", "clear_map cleared=%zu", had);
 }
 
+struct staged_target_context_t {
+	std::uint64_t address = 0;
+	std::uint32_t target_pid = 0;
+	std::uint64_t target_epoch = 0;
+	std::uint64_t process_creation_time_100ns = 0;
+	std::uint64_t source_generation = 0;
+	std::string source_view;
+	std::string source_identity;
+	std::function<bool(std::string&)> validate;
+};
+
+struct staged_target_state_t {
+	std::optional<staged_target_context_t> context;
+	std::string status;
+	bool stale = false;
+};
+
+inline staged_target_state_t g_staged_target;
+
+inline bool stage_target_context(staged_target_context_t context, std::string& error) {
+	if (context.address == 0 || context.target_pid == 0 || context.target_epoch == 0 ||
+		context.process_creation_time_100ns == 0 || context.source_generation == 0 ||
+		context.source_view.empty() || context.source_identity.empty() || !context.validate) {
+		error = "Pointer target handoff requires an exact live-process identity, source generation, and address.";
+		return false;
+	}
+	if (context.source_view.size() > 128U || context.source_identity.size() > 512U) {
+		error = "Pointer target handoff metadata exceeds the bounded staging limit.";
+		return false;
+	}
+	std::string validation_error;
+	if (!context.validate(validation_error)) {
+		error = validation_error.empty() ? "The pointer target source is stale." : validation_error;
+		return false;
+	}
+	g_staged_target.context = std::move(context);
+	g_staged_target.status = "Review the retained source identity before using this target.";
+	g_staged_target.stale = false;
+	error.clear();
+	return true;
 }
 
-#endif
+}

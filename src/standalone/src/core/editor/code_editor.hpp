@@ -82,31 +82,6 @@ struct document_payload_snapshot_t : document_metadata_snapshot_t {
     std::string content;
 };
 
-struct document_pane_render_context_t {
-    std::uint64_t document_id = 0;
-    std::uint64_t revision = 1;
-    std::string_view content;
-    std::string_view filename;
-    std::string_view filepath;
-    bool dirty = false;
-    int caret_line = 0;
-    int caret_column = 0;
-    int selection_anchor_line = 0;
-    int selection_anchor_column = 0;
-    bool selection_active = false;
-    float scroll_x = 0.f;
-    float scroll_y = 0.f;
-    const std::vector<int>* folded_lines = nullptr;
-    std::string_view language_override;
-    bool read_only = false;
-    std::string_view read_only_reason;
-    float alpha = 1.f;
-    float accent_r = 0.f;
-    float accent_g = 0.f;
-    float accent_b = 0.f;
-};
-
-
 struct selection_t {
     int  anchor_line = 0;
     int  anchor_col  = 0;
@@ -242,11 +217,6 @@ bool load_document(std::uint64_t document_id, std::uint64_t revision,
                    std::string_view language_override = {});
 
 
-void render(float pos_x, float pos_y, float width, float height,
-            float alpha, float accent_r, float accent_g, float accent_b);
-
-void render_document_pane(const document_pane_render_context_t& context = {});
-
 document_state_t document_state();
 
 document_state_t document_state(std::uint64_t document_id);
@@ -305,14 +275,6 @@ void mark_document_saved(std::uint64_t document_id, std::uint64_t revision,
 bool request_streamed_document(std::uint64_t document_id, std::uint64_t revision,
                                std::string_view filename, std::string_view filepath,
                                std::uint64_t byte_length);
-
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-bool configure_preview_stream_state(std::uint64_t document_id,
-                                    std::uint64_t advertised_byte_length,
-                                    bool loading,
-                                    bool cancellation_requested,
-                                    std::string_view error);
-#endif
 
 void trigger_undo();
 void trigger_redo();

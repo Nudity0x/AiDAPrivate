@@ -1,0 +1,26 @@
+{
+  "schema": "aida.standalone.surface-retirements.v1",
+  "retirements": [
+    {"kind":"test_lab_feature","id":"anti-debug/ADBG","reason":"Sentinel anti-debug Test Lab feature deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"anti-debug/DBGA","reason":"Sentinel anti-debug Test Lab feature deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"anti-debug/EVTS","reason":"Sentinel anti-debug Test Lab feature deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"anti-dump/ADMP","reason":"Sentinel anti-dump Test Lab feature deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"debug-attach/DBGA","reason":"Sentinel debug-attach Test Lab feature deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"dll/DPRT","reason":"Sentinel dll Test Lab feature deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"dma-canary/CANQ","reason":"Sentinel dma-canary Test Lab feature deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"dma-canary/CANR","reason":"Sentinel dma-canary Test Lab feature deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"evidence/RECU","reason":"Sentinel evidence Test Lab feature deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"hv-detect/HVDT","reason":"Sentinel hv-detect Test Lab feature deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"sentinel/Sentinel Evidence Ring","reason":"test_lab_features_sentinel.cpp deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"sentinel/Sentinel HB / TSC","reason":"test_lab_features_sentinel.cpp deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"sentinel/Sentinel HV Detect","reason":"test_lab_features_sentinel.cpp deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"sentinel/Sentinel Tier-A Health","reason":"test_lab_features_sentinel.cpp deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"session/HB","reason":"Sentinel session-heartbeat Test Lab feature deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"tamper/ABRT","reason":"Sentinel tamper Test Lab feature deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"tamper/RELA","reason":"Sentinel tamper Test Lab feature deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"tamper/SRV2","reason":"Sentinel tamper Test Lab feature deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"tamper/SRVT","reason":"Sentinel tamper Test Lab feature deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"test_lab_feature","id":"target-latch/TIRA","reason":"Sentinel target-latch Test Lab feature deleted with the Sentinel subsystem; tree carries 49 features while the stale final manifest pins 69","plan":"16 §0/§4.6","replacement":"none"},
+    {"kind":"source_contract","id":"win32_message_pump_invariants","reason":"Win32 message-pump contract retires when the Win32 loop dies in the shell wave; replaced by qt_eventloop_invariants anchored on the Qt main TU","plan":"16 §4.4","replacement":"src/standalone/src/qt/qt_main.cpp"}
+  ]
+}

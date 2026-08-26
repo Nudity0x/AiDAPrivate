@@ -28,8 +28,6 @@
 
 #pragma comment(lib, "gdiplus.lib")
 
-extern ID3D11Device* g_pd3dDevice;
-
 namespace re::dx_hook
 {
 namespace
@@ -1144,84 +1142,6 @@ std::size_t resolved_slot_count(const std::vector<slot_entry_t>& slots)
     return resolved;
 }
 
-std::vector<slot_entry_t> discover_d3d11_from_live_context(std::uint32_t pid)
-{
-    const std::uint64_t started_ms = GetTickCount64();
-    std::vector<slot_entry_t> slots;
-    ID3D11Device* device = g_pd3dDevice;
-    diag::log_tagged_fmt("dx_hook", "discover_d3d11_live enter pid=%u tid=%lu device=%p",
-                         pid,
-                         static_cast<unsigned long>(GetCurrentThreadId()),
-                         device);
-    if (!device)
-    {
-        diag::log_tagged_fmt("dx_hook", "discover_d3d11_live no_device pid=%u elapsed_ms=%llu",
-                             pid,
-                             static_cast<unsigned long long>(GetTickCount64() - started_ms));
-        return slots;
-    }
-
-    device->AddRef();
-    ID3D11DeviceContext* context = nullptr;
-    diag::log_tagged_fmt("dx_hook", "discover_d3d11_live get_context_begin pid=%u device=%p", pid, device);
-    device->GetImmediateContext(&context);
-    diag::log_tagged_fmt("dx_hook", "discover_d3d11_live get_context_end pid=%u context=%p elapsed_ms=%llu",
-                         pid,
-                         context,
-                         static_cast<unsigned long long>(GetTickCount64() - started_ms));
-    if (!context)
-    {
-        device->Release();
-        diag::log_tagged_fmt("dx_hook", "discover_d3d11_live no_context pid=%u elapsed_ms=%llu",
-                             pid,
-                             static_cast<unsigned long long>(GetTickCount64() - started_ms));
-        return slots;
-    }
-
-    auto vtable = *reinterpret_cast<std::uint64_t**>(context);
-    diag::log_tagged_fmt("dx_hook", "discover_d3d11_live vtable pid=%u context=%p vtable=%p",
-                         pid,
-                         context,
-                         vtable);
-    if (vtable)
-    {
-        for (const auto& [name, index] : d3d11_context_slots())
-        {
-            if (dx_call_cancelled("discover_d3d11_live_slots", pid, started_ms))
-                break;
-            slot_entry_t entry;
-            entry.name = name;
-            entry.slot = index;
-            entry.local_va = vtable[index];
-            diag::log_tagged_fmt("dx_hook", "discover_d3d11_live slot_begin pid=%u name=%s index=%u local_va=%s",
-                                 pid,
-                                 entry.name.c_str(),
-                                 entry.slot,
-                                 sa_format_address(entry.local_va).c_str());
-            entry.target_va = map_local_slot_to_target(pid, entry.name.c_str(), entry.slot, entry.local_va, "d3d11.dll", false, entry.module_name);
-            finalize_slot(pid, entry);
-            diag::log_tagged_fmt("dx_hook", "discover_d3d11_live slot_end pid=%u name=%s index=%u target_va=%s validated=%d hint=%s",
-                                 pid,
-                                 entry.name.c_str(),
-                                 entry.slot,
-                                 sa_format_address(entry.target_va).c_str(),
-                                 entry.validated ? 1 : 0,
-                                 entry.hint.c_str());
-            slots.push_back(std::move(entry));
-        }
-    }
-    context->Release();
-    device->Release();
-    diag::log_tagged_fmt("dx_hook", "discover_d3d11_live cleanup pid=%u context=%p device=%p slots=%zu resolved=%zu elapsed_ms=%llu",
-                         pid,
-                         context,
-                         device,
-                         slots.size(),
-                         resolved_slot_count(slots),
-                         static_cast<unsigned long long>(GetTickCount64() - started_ms));
-    return slots;
-}
-
 std::vector<slot_entry_t> discover_d3d11(std::uint32_t pid, bool allow_dummy_device = true)
 {
     const std::uint64_t started_ms = GetTickCount64();
@@ -1230,20 +1150,6 @@ std::vector<slot_entry_t> discover_d3d11(std::uint32_t pid, bool allow_dummy_dev
                          static_cast<unsigned long>(GetCurrentThreadId()),
                          allow_dummy_device ? 1 : 0);
     std::vector<slot_entry_t> slots;
-    auto live_slots = discover_d3d11_from_live_context(pid);
-    if (dx_call_cancelled("discover_d3d11_after_live", pid, started_ms))
-        return live_slots;
-    if (!live_slots.empty() && resolved_slot_count(live_slots) != 0)
-    {
-        diag::log_tagged_fmt("dx_hook", "discover_d3d11 live_exit pid=%u slots=%zu resolved=%zu elapsed_ms=%llu",
-                             pid,
-                             live_slots.size(),
-                             resolved_slot_count(live_slots),
-                             static_cast<unsigned long long>(GetTickCount64() - started_ms));
-        return live_slots;
-    }
-    if (!live_slots.empty())
-        slots = std::move(live_slots);
     if (!allow_dummy_device)
     {
         diag::log_tagged_fmt("dx_hook", "discover_d3d11 dummy_skipped pid=%u slots=%zu resolved=%zu elapsed_ms=%llu",

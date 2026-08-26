@@ -175,7 +175,7 @@ inline void emit_hung_breadcrumb(HWND hwnd, std::uint64_t age_ms, const char* ph
     opts.label = "window_hung_detected";
     opts.reason = reason;
     opts.force = true;
-    metadata_ring::emit(std::move(opts));
+    metadata_ring::emit_breadcrumb(std::move(opts));
 }
 
 }

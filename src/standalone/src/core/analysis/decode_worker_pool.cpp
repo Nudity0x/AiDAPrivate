@@ -441,7 +441,6 @@ decode_worker_pool_t::create(std::uint32_t worker_count,
     }
     const std::uint32_t requested_worker_count = worker_count;
     std::uint64_t lane_clamps = 0;
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
     const std::uint32_t fabric_capacity = rt::analysis_compute_capacity();
     const std::uint32_t capacity_ceiling = (std::min<std::uint32_t>)(64u, fabric_capacity);
     if (worker_count > capacity_ceiling)
@@ -456,9 +455,6 @@ decode_worker_pool_t::create(std::uint32_t worker_count,
             "lane_count_clamped requested=%u fabric_capacity=%u clamped=%u",
             requested_worker_count, fabric_capacity, worker_count);
     }
-#else
-    const std::uint32_t fabric_capacity = worker_count;
-#endif
     std::unique_ptr<impl_t> impl;
     try {
         impl = std::make_unique<impl_t>();

@@ -1,18 +1,18 @@
 #pragma once
 
-#include <cstdint>
 #include <string>
 
 namespace aida {
 namespace burp {
 namespace headless_view {
 
+// Lifecycle surface of the Camoufox headless view. The implementation lives in
+// the Qt port (qt/net/qt_headless_browser_view.cpp, QtHeadlessBrowserController
+// with identical semantics and headless_v log tags); these free functions
+// remain the call surface for burp_module.cpp and the Test Lab, which are
+// outside the view-slice edit surface. The ImGui render entry point is gone.
 bool initialize();
 void shutdown();
-
-void render(float pos_x, float pos_y, float width, float height,
-            float alpha, float accent_r, float accent_g, float accent_b);
-
 std::string last_error();
 
 }

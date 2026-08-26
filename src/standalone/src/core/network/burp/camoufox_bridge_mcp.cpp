@@ -83,7 +83,7 @@ struct camoufox_mcp_op_admission_t
             opts.lease_token = result.admission_token;
             opts.generation = identity.generation;
             opts.status_code = 0;
-            aida::diagnostics::emit(std::move(opts));
+            aida::diagnostics::emit_breadcrumb(std::move(opts));
         }
         else
         {
@@ -102,7 +102,7 @@ struct camoufox_mcp_op_admission_t
             opts.session_or_target = identity.session_id.c_str();
             opts.generation = identity.generation;
             opts.status_code = 1;
-            aida::diagnostics::emit(std::move(opts));
+            aida::diagnostics::emit_breadcrumb(std::move(opts));
         }
     }
 
@@ -131,7 +131,7 @@ struct camoufox_mcp_op_admission_t
         opts.lease_token = result.admission_token;
         opts.generation = identity.generation;
         opts.status_code = 0;
-        aida::diagnostics::emit(std::move(opts));
+        aida::diagnostics::emit_breadcrumb(std::move(opts));
         mcp_standalone::downstream::governor_t::instance().release(result.admission_token, reason ? reason : "completed");
         held = false;
     }

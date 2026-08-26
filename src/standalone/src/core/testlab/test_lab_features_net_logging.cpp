@@ -1,7 +1,6 @@
 #include "test_lab.hpp"
 #include "test_lab_format.hpp"
 #include "../../../../driver/comm.h"
-#include "imgui/imgui.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -108,18 +107,12 @@ namespace {
 		return (direction == 0) ? "<-" : "->";
 	}
 
-	void render_inputs_nlog(test_lab::state_t& s) {
-		ImGui::InputScalar("PID", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		ImGui::InputScalar("Ring Hint (u32_a, non-zero = register)", ImGuiDataType_U32, &s.u32_a,
-			nullptr, nullptr, "%u");
-		if (ImGui::SmallButton("Enable (u32_a=1)")) {
-			s.u32_a = 1u;
-		}
-		ImGui::SameLine();
-		if (ImGui::SmallButton("Disable (u32_a=0)")) {
-			s.u32_a = 0u;
-		}
-		ImGui::TextDisabled("u32_a != 0 enables per-pid network logging; 0 disables it. "
+	void render_inputs_nlog(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("PID", &s.pid, false);
+		form.u32("Ring Hint (u32_a, non-zero = register)", &s.u32_a, false);
+		form.action("Enable (u32_a=1)", [](test_lab::state_t& st) { st.u32_a = 1u; });
+		form.action("Disable (u32_a=0)", [](test_lab::state_t& st) { st.u32_a = 0u; });
+		form.note("u32_a != 0 enables per-pid network logging; 0 disables it. "
 			"Ring capacity is fixed kernel-side (NET_PKT_PULL_RING_CAPACITY).");
 	}
 
@@ -188,16 +181,13 @@ namespace {
 		r.ok = true;
 	}
 
-	void render_inputs_npkt(test_lab::state_t& s) {
-		ImGui::InputScalar("PID", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		ImGui::InputScalar("Max Packets (u32_a, 0 = ring max)", ImGuiDataType_U32, &s.u32_a,
-			nullptr, nullptr, "%u");
-		if (ImGui::SmallButton("256")) s.u32_a = 256u;
-		ImGui::SameLine();
-		if (ImGui::SmallButton("1024")) s.u32_a = 1024u;
-		ImGui::SameLine();
-		if (ImGui::SmallButton("Ring Max")) s.u32_a = 0u;
-		ImGui::TextDisabled("Drains buffered packets for the pid. Only the first 50 are listed; the full payload set "
+	void render_inputs_npkt(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("PID", &s.pid, false);
+		form.u32("Max Packets (u32_a, 0 = ring max)", &s.u32_a, false);
+		form.action("256", [](test_lab::state_t& st) { st.u32_a = 256u; });
+		form.action("1024", [](test_lab::state_t& st) { st.u32_a = 1024u; });
+		form.action("Ring Max", [](test_lab::state_t& st) { st.u32_a = 0u; });
+		form.note("Drains buffered packets for the pid. Only the first 50 are listed; the full payload set "
 			"is in the raw view.");
 	}
 

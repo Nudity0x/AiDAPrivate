@@ -2869,7 +2869,8 @@ namespace {
             std::vector<disasm_view::bookmark_t> saved;
             {
                 std::lock_guard<std::mutex> lock(context.view->mutex);
-                saved = context.view->bookmarks;
+                if (context.view->bookmark_cache.rows)
+                    saved = *context.view->bookmark_cache.rows;
             }
             const size_t before = saved.size();
 
@@ -2893,22 +2894,30 @@ namespace {
             bool tail_ok = false;
             {
                 std::lock_guard<std::mutex> lock(context.view->mutex);
-                context.view->bookmarks.push_back(bm1);
-                context.view->bookmarks.push_back(bm2);
-                context.view->bookmarks.push_back(bm3);
-                after = context.view->bookmarks.size();
+                std::vector<disasm_view::bookmark_t> next = context.view->bookmark_cache.rows
+                    ? *context.view->bookmark_cache.rows
+                    : std::vector<disasm_view::bookmark_t>{};
+                next.push_back(bm1);
+                next.push_back(bm2);
+                next.push_back(bm3);
+                context.view->bookmark_cache.rows =
+                    std::make_shared<const std::vector<disasm_view::bookmark_t>>(std::move(next));
+                const auto& live = *context.view->bookmark_cache.rows;
+                after = live.size();
                 tail_ok = after >= 3 &&
-                    context.view->bookmarks[after - 3].addr == bm1.addr &&
-                    context.view->bookmarks[after - 2].addr == bm2.addr &&
-                    context.view->bookmarks[after - 1].addr == bm3.addr;
-                context.view->bookmarks = saved;
+                    live[after - 3].addr == bm1.addr &&
+                    live[after - 2].addr == bm2.addr &&
+                    live[after - 1].addr == bm3.addr;
+                context.view->bookmark_cache.rows =
+                    std::make_shared<const std::vector<disasm_view::bookmark_t>>(saved);
             }
             log_msg(hf, tag, "STATE -- after add bookmarks=%zu expected=%zu tail_ok=%d",
                 after, before + 3, tail_ok ? 1 : 0);
             size_t restored_size = 0;
             {
                 std::lock_guard<std::mutex> lock(context.view->mutex);
-                restored_size = context.view->bookmarks.size();
+                restored_size = context.view->bookmark_cache.rows
+                    ? context.view->bookmark_cache.rows->size() : 0;
             }
             if (after == before + 3 && tail_ok && restored_size == before) {
                 log_msg(hf, tag, "PASS -- added 3 bookmarks (before=%zu, after=%zu) elapsed_us=%lld", before, after, elapsed_us_since(t0));
@@ -3040,14 +3049,17 @@ namespace {
             std::optional<aida::analysis::address_t> saved_selection;
             {
                 std::lock_guard<std::mutex> lock(context.view->mutex);
-                saved_bookmarks = context.view->bookmarks;
+                if (context.view->bookmark_cache.rows)
+                    saved_bookmarks = *context.view->bookmark_cache.rows;
                 saved_show_bytes = context.view->show_bytes;
                 saved_format = context.view->addr_format;
                 saved_selection = context.view->selection;
-                context.view->bookmarks = {
-                    {first->value, "workspace_seed_1"},
-                    {second->value, "workspace_seed_2"}
-                };
+                context.view->bookmark_cache.rows =
+                    std::make_shared<const std::vector<disasm_view::bookmark_t>>(
+                        std::vector<disasm_view::bookmark_t>{
+                            {first->value, "workspace_seed_1"},
+                            {second->value, "workspace_seed_2"}
+                        });
                 context.view->show_bytes = false;
                 context.view->addr_format = disasm_view::addr_format_t::rva;
                 context.view->selection = *third;
@@ -3063,11 +3075,12 @@ namespace {
             bool view_state_ok = false;
             if (recaptured) {
                 std::lock_guard<std::mutex> lock(recaptured.view->mutex);
+                const auto& live_rows = recaptured.view->bookmark_cache.rows;
                 view_state_ok = recaptured.view == context.view &&
                     recaptured.view->selection == third &&
-                    recaptured.view->bookmarks.size() == 2 &&
-                    recaptured.view->bookmarks[0].addr == first->value &&
-                    recaptured.view->bookmarks[1].addr == second->value &&
+                    live_rows && live_rows->size() == 2 &&
+                    (*live_rows)[0].addr == first->value &&
+                    (*live_rows)[1].addr == second->value &&
                     !recaptured.view->show_bytes &&
                     recaptured.view->addr_format == disasm_view::addr_format_t::rva;
             }
@@ -3082,7 +3095,9 @@ namespace {
             });
             {
                 std::lock_guard<std::mutex> lock(context.view->mutex);
-                context.view->bookmarks = std::move(saved_bookmarks);
+                context.view->bookmark_cache.rows =
+                    std::make_shared<const std::vector<disasm_view::bookmark_t>>(
+                        std::move(saved_bookmarks));
                 context.view->show_bytes = saved_show_bytes;
                 context.view->addr_format = saved_format;
                 context.view->selection = saved_selection;

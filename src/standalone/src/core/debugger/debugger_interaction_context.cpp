@@ -1,19 +1,14 @@
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-#include "../../preview/debugger_preview_runtime.hpp"
-#else
 #include "../runtime/standalone_driver.hpp"
 #include "../runtime/standalone_driver_identity.hpp"
-#endif
 
 #include "debugger_interaction_context.hpp"
 #include "debugger_engine.hpp"
 #include "../disasm/disasm_view.hpp"
 #include "../workbench/workbench_shell_integration.hpp"
 
-#include "imgui.h"
-
 #include <atomic>
 #include <algorithm>
+#include <chrono>
 #include <memory>
 #include <string_view>
 #include <utility>
@@ -129,22 +124,23 @@ void clear_published_selection_if_owned() {
 
 std::uint64_t current_process_creation_time(std::uint32_t pid) {
 	if (pid == 0) return 0;
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-	return aida::preview::debugger::process_creation_time_100ns;
-#else
-	static int cached_frame = -1;
+	static std::atomic<std::uint64_t> cached_tick_ms{0};
 	static std::uint32_t cached_pid = 0;
 	static std::uint64_t cached_creation = 0;
-	const int frame = ImGui::GetFrameCount();
-	if (cached_frame == frame && cached_pid == pid) return cached_creation;
+	const std::uint64_t now_ms = static_cast<std::uint64_t>(
+		std::chrono::duration_cast<std::chrono::milliseconds>(
+			std::chrono::steady_clock::now().time_since_epoch()).count());
+	const std::uint64_t tick = now_ms / 100U;
+	if (tick == cached_tick_ms.load(std::memory_order_acquire) &&
+		cached_pid == pid)
+		return cached_creation;
 	driver_bridge::identity::live_target_identity_t identity;
 	std::string error;
 	cached_creation = driver_bridge::identity::capture_live_target_identity(
 		pid, 0, identity, &error) ? identity.process.creation_time_100ns : 0;
 	cached_pid = pid;
-	cached_frame = frame;
+	cached_tick_ms.store(tick, std::memory_order_release);
 	return cached_creation;
-#endif
 }
 
 void publish_selection(const context_t& focused,
@@ -403,10 +399,6 @@ bool live_target_identity_current(const context_t& context) {
 	if (context.target_pid == 0 || context.process_creation_time_100ns == 0 ||
 		context.target_pid != driver_bridge::attached_pid())
 		return false;
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-	return context.process_creation_time_100ns ==
-		aida::preview::debugger::process_creation_time_100ns;
-#else
 	driver_bridge::identity::live_target_identity_t identity;
 	std::string error;
 	if (!driver_bridge::identity::capture_live_target_identity(
@@ -416,7 +408,6 @@ bool live_target_identity_current(const context_t& context) {
 		driver_bridge::identity::validate_attached_target_identity(identity);
 	return validation.matches && identity.process.pid == context.target_pid &&
 		identity.process.creation_time_100ns == context.process_creation_time_100ns;
-#endif
 }
 
 bool is_current(const context_t& context) {
@@ -489,12 +480,6 @@ capability_result_t evaluate(capability_t capability, const context_t& context) 
 			return denied("A verified kernel session is required.");
 	}
 	return allowed();
-}
-
-bool context_key_pressed() {
-	const ImGuiIO& io = ImGui::GetIO();
-	return ImGui::IsKeyPressed(ImGuiKey_Menu, false) ||
-		(io.KeyShift && ImGui::IsKeyPressed(ImGuiKey_F10, false));
 }
 
 }

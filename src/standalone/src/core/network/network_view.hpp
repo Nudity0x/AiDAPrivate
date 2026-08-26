@@ -4,14 +4,28 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
+#include "mitm_proxy.hpp"
+
 
 namespace voyager { class device_t; }
+namespace ssl_keylog { struct keylog_entry; }
+namespace cert_intercept {
+struct diagnostic_context_t;
+struct process_diagnostics_t;
+struct provider_status_t;
+}
+namespace aida::ui {
+enum class context_menu_open_origin_t : std::uint8_t;
+namespace application_ui { struct retained_entity_context_t; }
+}
 
 namespace network_view {
 
@@ -272,19 +286,12 @@ struct payload_set_t {
 
 struct state_t {
     bool active = false;
-    std::atomic<uint64_t> last_render_tick_ms{0};
 
     sub_tab_t active_tab = sub_tab_t::connections;
 
-
-    std::mutex                    conn_mutex;
-    std::vector<connection_entry_t> connections;
-    std::shared_ptr<const std::vector<connection_entry_t>> connection_snapshot;
-    int                           conn_selected = -1;
     uint32_t                      conn_filter_pid = 0;
     uint8_t                       conn_filter_protocol = 0;
-    char                          conn_filter_text[128] = {};
-    bool                          conn_auto_refresh = true;
+    std::atomic<bool>             conn_pane_visible{false};
     std::atomic<bool>             conn_auto_refresh_enabled{true};
     std::atomic<bool>             conn_thread_done{true};
     std::atomic<bool>             conn_polling{false};
@@ -296,17 +303,13 @@ struct state_t {
 
     std::mutex                    cap_mutex;
     std::deque<packet_entry_t>    captured_packets;
-    std::shared_ptr<const std::vector<packet_entry_t>> capture_snapshot;
     size_t                        cap_max_packets = 8192;
-    std::atomic<int>              cap_selected{-1};
     std::atomic<bool>             cap_running{false};
     std::atomic<bool>             cap_start_pending{false};
     std::atomic<bool>             cap_stop_pending{false};
     uint32_t                      cap_filter_pid = 0;
     uint16_t                      cap_filter_port = 0;
     uint8_t                       cap_filter_protocol = 0;
-    char                          cap_filter_text[128] = {};
-    bool                          cap_auto_scroll = true;
     std::atomic<bool>             cap_thread_done{true};
     std::atomic<bool>             cap_polling{false};
     std::mutex                    cap_cv_mutex;
@@ -314,25 +317,16 @@ struct state_t {
     std::atomic<bool>             cap_thread_alive{false};
 
 
-    bool                          intercept_enabled = false;
-    int                           intercept_selected = -1;
-
-
     char                          proxy_bind_addr[64] = "127.0.0.1";
     int                           proxy_port = 8443;
     bool                          proxy_decode_tls = true;
-    int                           proxy_selected = -1;
     char                          proxy_filter_text[128] = {};
 
 
     std::mutex                    dns_mutex;
     std::deque<dns_entry_t>       dns_entries;
-    std::shared_ptr<const std::vector<dns_entry_t>> dns_snapshot;
     size_t                        dns_max_entries = 8192;
-    int                           dns_selected = -1;
     uint32_t                      dns_filter_pid = 0;
-    char                          dns_filter_text[128] = {};
-    bool                          dns_auto_scroll = true;
     std::atomic<bool>             dns_thread_done{true};
     std::atomic<bool>             dns_polling{false};
     std::atomic<bool>             dns_refresh_pending{false};
@@ -357,9 +351,7 @@ struct state_t {
 
     std::mutex                    bw_mutex;
     std::vector<bw_entry_t>       bw_entries;
-    std::shared_ptr<const std::vector<bw_entry_t>> bandwidth_snapshot;
     bool                          bw_monitoring = false;
-    int                           bw_selected = -1;
     std::atomic<bool>             bw_thread_done{true};
     std::atomic<bool>             bw_polling{false};
     std::atomic<bool>             bw_control_pending{false};
@@ -379,8 +371,6 @@ struct state_t {
     char                          kl_exe_path[512] = {};
     char                          kl_args[512] = {};
     char                          kl_watch_path[512] = {};
-    int                           kl_selected = -1;
-    bool                          kl_auto_scroll = true;
 
 
     char                          pcap_path[512] = {};
@@ -546,22 +536,6 @@ struct state_t {
     std::string                   decoder_output;
     int                           decoder_selected_step = -1;
     int                           decoder_add_transform = 0;
-
-
-    bool                          show_detail = true;
-    float                         detail_ratio = 0.65f;
-
-
-    float tab_anim[static_cast<int>(sub_tab_t::COUNT)] = {};
-
-    float tab_scroll_x = 0.f;
-    float tab_target_scroll_x = 0.f;
-    int   tab_last_ensured = -1;
-    float underline_x = 0.f;
-    float underline_w = 0.f;
-    float underline_vel = 0.f;
-    float content_fade = 1.f;
-    sub_tab_t prev_tab = sub_tab_t::connections;
 };
 
 inline state_t g_state;
@@ -571,12 +545,233 @@ void initialize();
 void shutdown();
 
 
-void render(float pos_x, float pos_y, float width, float height,
-            float alpha, float accent_r, float accent_g, float accent_b);
+struct proxy_runtime_snapshot_t {
+    mitm_proxy::proxy_stats stats;
+    std::vector<mitm_proxy::http_exchange> history;
+    bool ca_ready = false;
+    bool ca_installed = false;
+    std::string spki_prefix;
+    bool controlled_browser_running = false;
+    bool bypass_active = false;
+    std::size_t bypass_count = 0;
+};
 
-const char* tab_name(sub_tab_t tab) noexcept;
-void render_pane(sub_tab_t tab, float pos_x, float pos_y, float width, float height,
-                 float alpha, float accent_r, float accent_g, float accent_b);
+struct intercept_runtime_snapshot_t {
+    std::uint64_t generation = 0;
+    bool running = false;
+    bool enabled = false;
+    std::vector<mitm_proxy::http_exchange> held;
+};
+
+struct intercept_target_identity_t {
+    std::uint64_t publication_generation = 0;
+    std::uint64_t exchange_id = 0;
+    std::uint64_t timestamp = 0;
+    std::uint64_t content_hash = 0;
+    std::size_t content_size = 0;
+
+    bool valid() const noexcept {
+        return publication_generation != 0 && exchange_id != 0 &&
+            content_hash != 0;
+    }
+};
+
+inline constexpr std::size_t k_intercept_editor_capacity = 65536U;
+
+struct intercept_modified_draft_t {
+    intercept_target_identity_t source;
+    std::string raw_request;
+    std::uint64_t content_hash = 0;
+    bool loaded = false;
+    bool editable = false;
+    std::string unavailable_reason;
+};
+
+enum class intercept_operation_t {
+    set_enabled,
+    forward_all,
+    drop_all,
+    forward_one,
+    drop_one,
+    forward_modified
+};
+
+struct intercept_drop_review_t {
+    bool open = false;
+    bool all = false;
+    intercept_target_identity_t target;
+    std::size_t reviewed_count = 0;
+    std::shared_ptr<const intercept_runtime_snapshot_t> reviewed_publication;
+};
+
+struct keylog_runtime_snapshot_t {
+    bool watching = false;
+    std::string path;
+    std::size_t entry_count = 0;
+    std::vector<ssl_keylog::keylog_entry> entries;
+};
+
+
+using open_view_handler_t = std::function<std::string(const char* view_id)>;
+void set_open_view_handler(open_view_handler_t handler);
+std::string open_view(const char* view_id);
+
+using save_file_dialog_fn = std::function<std::string(
+    const char* title, const char* filter_pairs, const char* default_extension,
+    const std::string& initial_name)>;
+void set_save_file_dialog_handler(save_file_dialog_fn fn);
+
+void set_clipboard_text_handler(std::function<void(const std::string&)> fn);
+
+void request_driver_available_snapshot(bool force = false);
+bool driver_available_snapshot();
+
+using exchange_context_display_fn = std::function<void(
+    aida::ui::application_ui::retained_entity_context_t context,
+    aida::ui::context_menu_open_origin_t origin)>;
+void set_exchange_context_display(exchange_context_display_fn fn);
+
+
+enum class exchange_review_kind_t : std::uint8_t {
+    none,
+    create_issue,
+    replay,
+    remove
+};
+
+enum class exchange_remove_source_t : std::uint8_t {
+    none,
+    proxy,
+    repeater
+};
+
+struct exchange_review_presented_t {
+    exchange_review_kind_t kind = exchange_review_kind_t::none;
+    artifact_identity_t primary;
+    artifact_identity_t related;
+    std::string issue_name;
+    std::string issue_description;
+    std::string issue_remediation;
+    int issue_severity = 0;
+    int issue_confidence = 0;
+};
+
+using exchange_review_display_fn = std::function<void(const exchange_review_presented_t& presented)>;
+void set_exchange_review_display(exchange_review_display_fn fn);
+bool submit_exchange_review_issue(const exchange_review_presented_t& values, std::string& reason);
+bool submit_exchange_review_replay(std::string& reason);
+bool submit_exchange_review_removal(std::string& reason);
+void cancel_exchange_review() noexcept;
+
+struct exchange_remove_receipt_t {
+    exchange_remove_source_t source = exchange_remove_source_t::none;
+    std::string label;
+    bool operation_pending = false;
+    bool restored = false;
+    std::string error;
+};
+
+using exchange_remove_receipt_fn = std::function<void(const exchange_remove_receipt_t& receipt)>;
+void set_exchange_remove_receipt_display(exchange_remove_receipt_fn fn);
+bool submit_exchange_remove_undo(std::string& reason);
+void dismiss_exchange_remove_receipt() noexcept;
+void drain_exchange_remove_undo_fallback();
+
+
+using connection_snapshot_sink_t = std::function<void(
+    std::shared_ptr<const std::vector<connection_entry_t>> snapshot)>;
+using capture_batch_sink_t = std::function<void(
+    std::shared_ptr<const std::vector<packet_entry_t>> batch,
+    std::size_t trimmed_from_front)>;
+using dns_batch_sink_t = std::function<void(
+    std::shared_ptr<const std::vector<dns_entry_t>> batch,
+    std::size_t trimmed_from_front)>;
+using bandwidth_snapshot_sink_t = std::function<void(
+    std::shared_ptr<const std::vector<bw_entry_t>> snapshot)>;
+
+void set_connection_snapshot_sink(connection_snapshot_sink_t sink);
+void set_capture_batch_sink(capture_batch_sink_t sink);
+void set_dns_batch_sink(dns_batch_sink_t sink);
+void set_bandwidth_snapshot_sink(bandwidth_snapshot_sink_t sink);
+std::shared_ptr<const std::vector<packet_entry_t>> capture_packets_snapshot();
+std::shared_ptr<const std::vector<dns_entry_t>> dns_entries_snapshot();
+std::string capture_control_status_text();
+std::size_t capture_buffered_count();
+
+void request_connection_refresh();
+void request_dns_refresh();
+void request_bandwidth_control(bool start);
+bool start_pcap_export();
+bool start_har_export(const std::string& har_path);
+std::string filter_draft_error();
+bool filter_mutation_pending();
+using filters_changed_sink_t = std::function<void()>;
+void set_filters_changed_sink(filters_changed_sink_t sink);
+
+
+void request_proxy_runtime_snapshot(bool force = false);
+std::shared_ptr<const proxy_runtime_snapshot_t> proxy_runtime_snapshot();
+using proxy_snapshot_sink_t = std::function<void(
+    std::shared_ptr<const proxy_runtime_snapshot_t> snapshot)>;
+void set_proxy_snapshot_sink(proxy_snapshot_sink_t sink);
+bool proxy_operation_pending();
+void request_legacy_bypass_revert(std::size_t reviewed_count);
+void request_certificate_diagnostics(std::uint32_t target_pid,
+                                     cert_intercept::diagnostic_context_t context);
+void request_certificate_handoff(cert_intercept::process_diagnostics_t report,
+                                 std::vector<cert_intercept::provider_status_t> providers,
+                                 std::string proxy_endpoint);
+bool cert_diagnostics_pending();
+bool cert_handoff_pending();
+using cert_diagnostics_sink_t = std::function<void(
+    bool success, cert_intercept::process_diagnostics_t report,
+    std::vector<cert_intercept::provider_status_t> providers, std::string status)>;
+using cert_handoff_sink_t = std::function<void(bool success, std::string status)>;
+void set_cert_diagnostics_sink(cert_diagnostics_sink_t sink);
+void set_cert_handoff_sink(cert_handoff_sink_t sink);
+
+
+void request_intercept_runtime_snapshot(bool force = false);
+std::shared_ptr<const intercept_runtime_snapshot_t> intercept_runtime_snapshot();
+using intercept_snapshot_sink_t = std::function<void(
+    std::shared_ptr<const intercept_runtime_snapshot_t> snapshot)>;
+void set_intercept_snapshot_sink(intercept_snapshot_sink_t sink);
+bool intercept_operation_pending();
+intercept_target_identity_t intercept_target_identity(
+    const intercept_runtime_snapshot_t& publication,
+    const mitm_proxy::http_exchange& exchange);
+bool intercept_editor_compatible(const std::vector<std::uint8_t>& bytes,
+                                 std::string& unavailable_reason);
+void retain_intercept_modified_draft(const intercept_runtime_snapshot_t& publication,
+                                     const mitm_proxy::http_exchange& exchange);
+bool refresh_intercept_modified_draft(std::string& unavailable_reason);
+intercept_modified_draft_t intercept_modified_draft();
+void set_intercept_modified_draft_text(std::string raw_request);
+void set_intercept_editor_state(bool pretty_dirty, bool oversized, bool binary,
+                                std::string error);
+void set_intercept_selected_exchange(std::uint64_t exchange_id);
+using intercept_drop_review_display_fn = std::function<void(intercept_drop_review_t review)>;
+void set_intercept_drop_review_display(intercept_drop_review_display_fn fn);
+bool confirm_intercept_drop_review();
+void cancel_intercept_drop_review() noexcept;
+
+
+void request_keylog_runtime_snapshot(bool force = false);
+std::shared_ptr<const keylog_runtime_snapshot_t> keylog_runtime_snapshot();
+using keylog_snapshot_sink_t = std::function<void(
+    std::shared_ptr<const keylog_runtime_snapshot_t> snapshot)>;
+void set_keylog_snapshot_sink(keylog_snapshot_sink_t sink);
+bool keylog_operation_pending();
+
+
+artifact_identity_t exchange_artifact_identity(const mitm_proxy::http_exchange& exchange,
+                                               artifact_kind_t kind);
+bool execute_retained_exchange_toolbar_action(const char* action_id,
+                                              artifact_identity_t primary,
+                                              artifact_identity_t related,
+                                              std::string& unavailable_reason);
+void publish_network_selection(const artifact_identity_t& identity, bool force = false);
+void clear_stale_network_selection(std::string_view source_view_id);
 
 bool resolve_artifact(const artifact_identity_t& identity, artifact_snapshot_t& snapshot,
                       std::string& unavailable_reason);
@@ -590,6 +785,5 @@ bool make_sitemap_artifact(std::uint64_t exchange_id, artifact_kind_t kind,
 void open_exchange_context(artifact_identity_t primary, artifact_identity_t related,
                            exchange_context_origin_t origin,
                            bool include_intercept_actions = false);
-void render_exchange_context();
 
 }

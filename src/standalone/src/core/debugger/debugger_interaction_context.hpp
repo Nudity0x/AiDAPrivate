@@ -85,6 +85,5 @@ void clear();
 bool live_target_identity_current(const context_t& context);
 bool is_current(const context_t& context);
 capability_result_t evaluate(capability_t capability, const context_t& context);
-bool context_key_pressed();
 
 }

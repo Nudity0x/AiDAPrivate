@@ -22,12 +22,6 @@ struct tab_info_t {
     bool is_error = false;
 };
 
-void render(float pos_x, float pos_y, float width, float height,
-            float alpha, float accent_r, float accent_g, float accent_b,
-            const disasm_view::workspace_context_t& context);
-void render(float pos_x, float pos_y, float width, float height,
-            float alpha, float accent_r, float accent_g, float accent_b);
-
 void request_decompile(const disasm_view::workspace_context_t& context,
                        std::uint64_t address, bool force_refresh = false);
 void request_decompile(

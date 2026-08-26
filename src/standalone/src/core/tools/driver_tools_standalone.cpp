@@ -90,7 +90,7 @@ struct driver_debugger_quota_guard_t
             opts.tool_or_request_id = tool_name.c_str();
             opts.lease_token = token;
             opts.status_code = 0;
-            aida::diagnostics::emit(std::move(opts));
+            aida::diagnostics::emit_breadcrumb(std::move(opts));
             mcp_standalone::downstream::governor_t::instance().release(token, "driver_debugger_scope_exit");
         }
         else
@@ -106,7 +106,7 @@ struct driver_debugger_quota_guard_t
             opts.tool_or_request_id = tool_name.c_str();
             opts.lease_token = token;
             opts.status_code = 1;
-            aida::diagnostics::emit(std::move(opts));
+            aida::diagnostics::emit_breadcrumb(std::move(opts));
         }
         token = 0;
     }
@@ -143,7 +143,7 @@ static std::optional<tool_result_t> acquire_driver_debugger_quota(
         opts.owner_subsystem = "driver_tools";
         opts.tool_or_request_id = id.tool_name.c_str();
         opts.status_code = 1;
-        aida::diagnostics::emit(std::move(opts));
+        aida::diagnostics::emit_breadcrumb(std::move(opts));
         return tool_result_t::error(
             "Downstream driver/debugger capacity exhausted; work was not started.",
             "MCP_DOWNSTREAM_CAPACITY_REJECT",
@@ -164,7 +164,7 @@ static std::optional<tool_result_t> acquire_driver_debugger_quota(
     admit_opts.session_or_target = id.target_id.c_str();
     admit_opts.lease_token = result.admission_token;
     admit_opts.status_code = 0;
-    aida::diagnostics::emit(std::move(admit_opts));
+    aida::diagnostics::emit_breadcrumb(std::move(admit_opts));
 
     guard.token = result.admission_token;
     guard.tool_name = id.tool_name;

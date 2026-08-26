@@ -4,6 +4,7 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <Windows.h>
+#include <psapi.h>
 
 #include <cstdint>
 #include <cstdio>
@@ -170,7 +171,7 @@ inline void emit_crash_breadcrumb(DWORD exception_code, void* exception_address,
     opts.reason = reason;
     opts.owner_subsystem = boundary_name;
     opts.force = true;
-    metadata_ring::emit(std::move(opts));
+    metadata_ring::emit_breadcrumb(std::move(opts));
 }
 
 }

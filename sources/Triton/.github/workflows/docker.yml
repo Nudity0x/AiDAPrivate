@@ -1,0 +1,23 @@
+name: Docker Image CI
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Triton repository
+        uses: actions/checkout@v6
+
+      - name: Set timestamp variable
+        run: |
+          echo "TIMESTAMP=$(date +%s)" >> $GITHUB_ENV
+
+      - name: Build Docker image
+        run: |
+          docker build . --file Dockerfile --tag triton-docker:$TIMESTAMP
+
+      - name: Run tests
+        run: |
+          docker run --entrypoint /bin/bash --rm triton-docker:$TIMESTAMP -c 'ctest --test-dir /tmp/triton-build/ --output-on-failure'

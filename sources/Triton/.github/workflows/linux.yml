@@ -1,0 +1,45 @@
+name: Tests on Linux
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13', '3.14']
+        boost-interface: ['ON', 'OFF']
+    steps:
+      - name: Checkout Triton repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Triton dependencies
+        uses: ./.github/actions/install-triton-deps/linux
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compile Triton
+        run: |
+          cmake -B build \
+                -DZ3_INTERFACE=ON \
+                -DZ3_INCLUDE_DIRS=${{ env.Z3_INCLUDE_DIRS }} \
+                -DZ3_LIBRARIES=${{ env.Z3_LIBRARIES }} \
+                -DBITWUZLA_INTERFACE=ON \
+                -DBITWUZLA_INCLUDE_DIRS=${{ env.BITWUZLA_INCLUDE_DIRS }} \
+                -DBITWUZLA_LIBRARIES=${{ env.BITWUZLA_LIBRARIES }} \
+                -DLLVM_INTERFACE=ON \
+                -DCMAKE_PREFIX_PATH=${{ env.LLVM_PATH }} \
+                -DBOOST_INTERFACE=${{ matrix.boost-interface }} \
+                -DCAPSTONE_INCLUDE_DIRS=${{ env.CAPSTONE_INCLUDE_DIRS }} \
+                -DCAPSTONE_LIBRARIES=${{ env.CAPSTONE_LIBRARIES }}
+          cmake --build build --config Release --parallel 2
+          cmake --install build --config Release --prefix install
+
+      - name: Run tests
+        run: |
+          ctest --test-dir build --output-on-failure -C Release

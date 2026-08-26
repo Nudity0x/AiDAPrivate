@@ -1,10 +1,6 @@
 #pragma once
 
-#ifdef AIDA_IMGUI_STUDIO_PREVIEW
-#include "../../../preview/network_preview_executor.hpp"
-#else
 #include "../../infra/executor.hpp"
-#endif
 #include "../../ui/task_center.hpp"
 
 #include <atomic>

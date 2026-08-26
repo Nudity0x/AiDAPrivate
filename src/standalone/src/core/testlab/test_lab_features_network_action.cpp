@@ -6,7 +6,6 @@
 #include "test_lab.hpp"
 #include "test_lab_format.hpp"
 #include "../../../../driver/comm.h"
-#include "imgui/imgui.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -54,25 +53,6 @@ namespace {
 		r.ntstatus = static_cast<std::int32_t>(status);
 		r.ok = false;
 		r.skipped = false;
-	}
-
-	void copy_into_string_buf(char* dst, std::size_t cap, const std::string& src) {
-		if (cap == 0) return;
-		std::size_t n = src.size();
-		if (n >= cap) n = cap - 1;
-		std::memcpy(dst, src.data(), n);
-		dst[n] = '\0';
-	}
-
-	bool render_text_field(const char* label, std::string& storage, std::size_t cap) {
-		char tmp[512];
-		if (cap > sizeof(tmp)) cap = sizeof(tmp);
-		copy_into_string_buf(tmp, cap, storage);
-		bool changed = ImGui::InputText(label, tmp, cap);
-		if (changed) {
-			storage.assign(tmp);
-		}
-		return changed;
 	}
 
 	std::string format_ipv4(const std::uint8_t a[4]) {
@@ -870,23 +850,20 @@ namespace {
 		return true;
 	}
 
-	void render_inputs_pred(test_lab::state_t& s) {
+	void render_inputs_pred(test_lab::state_t& s, test_lab::input_form_t& form) {
 		const char* ops[] = { "Add (op=0)", "List (op=1 UI)", "Remove (op=2 UI)" };
-		int sel = static_cast<int>(s.u32_a);
-		if (sel < 0 || sel > 2) sel = 0;
-		if (ImGui::Combo("Operation", &sel, ops, IM_ARRAYSIZE(ops))) {
-			s.u32_a = static_cast<std::uint32_t>(sel);
-		}
-		render_text_field("Source spec (tcp://1.2.3.4:80 or udp:443 or 1.2.3.4:0)", s.text_a, 256);
+		const int sel = (s.u32_a <= 2u) ? static_cast<int>(s.u32_a) : 0;
+		form.combo("Operation", &s.u32_a, ops, sizeof(ops) / sizeof(ops[0]));
+		form.text("Source spec (tcp://1.2.3.4:80 or udp:443 or 1.2.3.4:0)", &s.text_a, 256);
 		if (sel == 0) {
-			render_text_field("Destination spec (tcp://10.0.0.1:8080)", s.text_b, 256);
+			form.text("Destination spec (tcp://10.0.0.1:8080)", &s.text_b, 256);
 		}
 		else if (sel == 2) {
-			ImGui::TextDisabled("Remove: enter the numeric rule_id in Destination spec.");
-			render_text_field("Rule ID (decimal)", s.text_b, 32);
+			form.note("Remove: enter the numeric rule_id in Destination spec.");
+			form.text("Rule ID (decimal)", &s.text_b, 32);
 		}
 		else {
-			ImGui::TextDisabled("List: source/destination fields are ignored.");
+			form.note("List: source/destination fields are ignored.");
 		}
 	}
 
@@ -1082,8 +1059,8 @@ namespace {
 		r.ok = true;
 	}
 
-	void render_inputs_strm(test_lab::state_t&) {
-		ImGui::TextDisabled("Self-bootstraps a localhost TCP pair, drives the full stream-reassembly "
+	void render_inputs_strm(test_lab::state_t&, test_lab::input_form_t& form) {
+		form.note("Self-bootstraps a localhost TCP pair, drives the full stream-reassembly "
 			"lifecycle (START op=0 -> traffic -> GET op=2 -> STOP op=1) and verifies each step. "
 			"No user input required.");
 	}
@@ -1258,8 +1235,8 @@ namespace {
 		r.ok = true;
 	}
 
-	void render_inputs_ckil(test_lab::state_t&) {
-		ImGui::TextDisabled("Self-bootstraps a localhost TCP pair (127.0.0.1 listener+client), then asks "
+	void render_inputs_ckil(test_lab::state_t&, test_lab::input_form_t& form) {
+		form.note("Self-bootstraps a localhost TCP pair (127.0.0.1 listener+client), then asks "
 			"the driver to kill the client side by 5-tuple. Validates kernel-side teardown via the "
 			"driver-populated status code and a post-kill send() probe (expected to fail). "
 			"No user input required.");
@@ -1378,24 +1355,21 @@ namespace {
 		r.ok = true;
 	}
 
-	void render_inputs_dnss(test_lab::state_t& s) {
+	void render_inputs_dnss(test_lab::state_t& s, test_lab::input_form_t& form) {
 		const char* ops[] = { "Add (op=0)", "List (op=2)", "Remove (op=1)" };
-		int sel = static_cast<int>(s.u32_a);
-		if (sel < 0 || sel > 2) sel = 0;
-		if (ImGui::Combo("Operation", &sel, ops, IM_ARRAYSIZE(ops))) {
-			s.u32_a = static_cast<std::uint32_t>(sel);
-		}
-		render_text_field("Domain (e.g. example.com)", s.text_a, voyager::detail::DNS_SPOOF_MAX_DOMAIN);
+		const int sel = (s.u32_a <= 2u) ? static_cast<int>(s.u32_a) : 0;
+		form.combo("Operation", &s.u32_a, ops, sizeof(ops) / sizeof(ops[0]));
+		form.text("Domain (e.g. example.com)", &s.text_a, voyager::detail::DNS_SPOOF_MAX_DOMAIN);
 		if (sel == 0) {
-			render_text_field("Spoof IP (1.2.3.4)", s.text_b, 64);
-			ImGui::TextDisabled("Adds a rule that resolves the domain to the spoof IP (AF_INET, TTL=300).");
+			form.text("Spoof IP (1.2.3.4)", &s.text_b, 64);
+			form.note("Adds a rule that resolves the domain to the spoof IP (AF_INET, TTL=300).");
 		}
 		else if (sel == 2) {
-			ImGui::TextDisabled("Remove: enter the numeric rule_id in the Spoof IP field.");
-			render_text_field("Rule ID (decimal)", s.text_b, 32);
+			form.note("Remove: enter the numeric rule_id in the Spoof IP field.");
+			form.text("Rule ID (decimal)", &s.text_b, 32);
 		}
 		else {
-			ImGui::TextDisabled("List: domain / IP fields are ignored.");
+			form.note("List: domain / IP fields are ignored.");
 		}
 	}
 
@@ -1594,22 +1568,17 @@ namespace {
 		r.ok = true;
 	}
 
-	void render_inputs_bwmn(test_lab::state_t& s) {
+	void render_inputs_bwmn(test_lab::state_t& s, test_lab::input_form_t& form) {
 		const char* scopes[] = { "Per-connection / per-PID (scope=0)", "Per-interface (scope=1)" };
-		int sel = static_cast<int>(s.u32_a);
-		if (sel < 0 || sel > 1) sel = 0;
-		if (ImGui::Combo("Scope", &sel, scopes, IM_ARRAYSIZE(scopes))) {
-			s.u32_a = static_cast<std::uint32_t>(sel);
-		}
+		const int sel = (s.u32_a <= 1u) ? static_cast<int>(s.u32_a) : 0;
+		form.combo("Scope", &s.u32_a, scopes, sizeof(scopes) / sizeof(scopes[0]));
 		if (sel == 0) {
-			ImGui::InputScalar("Filter PID (0 = totals only)",
-				ImGuiDataType_U64, &s.u64_a, nullptr, nullptr, "%llu");
-			ImGui::TextDisabled("Queries aggregate totals with op=2 and per-process counters with op=4.");
+			form.u64("Filter PID (0 = totals only)", &s.u64_a, false);
+			form.note("Queries aggregate totals with op=2 and per-process counters with op=4.");
 		}
 		else {
-			ImGui::InputScalar("Interface index (informational)",
-				ImGuiDataType_U64, &s.u64_a, nullptr, nullptr, "%llu");
-			ImGui::TextDisabled("Per-interface scope is reported via aggregate totals only; the driver does not expose per-IF counters on BWMN.");
+			form.u64("Interface index (informational)", &s.u64_a, false);
+			form.note("Per-interface scope is reported via aggregate totals only; the driver does not expose per-IF counters on BWMN.");
 		}
 	}
 
@@ -1828,9 +1797,9 @@ namespace {
 		r.ok = true;
 	}
 
-	void render_inputs_pcex(test_lab::state_t& s) {
-		render_text_field("Pcap output path (e.g. C:\\temp\\capture.pcap)", s.text_a, 512);
-		ImGui::TextDisabled("Drains the kernel capture ring (up to 256 packets), then writes a valid libpcap-format file at the path.");
+	void render_inputs_pcex(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.text("Pcap output path (e.g. C:\\temp\\capture.pcap)", &s.text_a, 512);
+		form.note("Drains the kernel capture ring (up to 256 packets), then writes a valid libpcap-format file at the path.");
 	}
 
 	bool write_pcap_file(const std::string& path,

@@ -2,10 +2,6 @@
 
 #include "core/settings/standalone_settings.hpp"
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-#include "preview/shell_preview_platform.hpp"
-#include "preview/shell_preview.hpp"
-#else
 #include "core/infra/executor.hpp"
 #include "core/ui/task_center.hpp"
 #include "core/ui/ui_thread_dispatcher.hpp"
@@ -14,40 +10,11 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#endif
 
 #include <utility>
 
 namespace aida::settings_persistence {
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-
-request_result_t request_save(const settings_sa_t&, std::uint64_t* generation) noexcept
-{
-    if (generation)
-        *generation = 1;
-    aida::preview::record(aida::preview::shell_action_t::save_file, "settings");
-    return request_result_t::preview_recorded;
-}
-
-bool commit_lifecycle(const settings_sa_t&, std::string& error) noexcept
-{
-    error.clear();
-    aida::preview::record(aida::preview::shell_action_t::save_file, "settings.lifecycle");
-    return true;
-}
-
-bool shutdown_commit(const settings_sa_t& settings, std::string& error) noexcept
-{
-    return commit_lifecycle(settings, error);
-}
-
-status_t status() noexcept
-{
-    return {};
-}
-
-#else
 namespace {
 
 struct runtime_t {
@@ -426,6 +393,5 @@ status_t status() noexcept
     return current.ui_status;
 }
 
-#endif
 
 }

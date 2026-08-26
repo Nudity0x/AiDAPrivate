@@ -1,12 +1,12 @@
 #pragma once
 
-#include "imgui/imgui.h"
 #include "test_lab.hpp"
 #include "../../helpers/diag_log.hpp"
 
 #include <cstdarg>
 #include <cstdint>
 #include <cstdio>
+#include <string>
 #include <vector>
 
 namespace test_lab_format {
@@ -120,9 +120,9 @@ namespace test_lab_format {
 		return s_buf;
 	}
 
-	inline void render_hex_ascii(const std::vector<std::uint8_t>& buf) {
+	inline void render_hex_ascii(const std::vector<std::uint8_t>& buf, std::string& out) {
 		if (buf.empty()) {
-			ImGui::TextDisabled("(empty)");
+			out.append("(empty)\n");
 			return;
 		}
 		const std::size_t bytes_per_row = 16;
@@ -150,7 +150,8 @@ namespace test_lab_format {
 			ascii_part[ap] = '\0';
 			std::snprintf(line, sizeof(line), "%08zX  %s %s",
 				row, hex_part, ascii_part);
-			ImGui::TextUnformatted(line);
+			out.append(line);
+			out.push_back('\n');
 		}
 	}
 

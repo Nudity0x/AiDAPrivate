@@ -3,9 +3,6 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include "../../../../../driver/comm.h"
-#include "imgui/imgui.h"
-
-#pragma comment(lib, "ws2_32.lib")
 
 #include <cstdint>
 #include <cstdio>
@@ -633,14 +630,10 @@ namespace {
 		}
 	}
 
-	void render_inputs_ncon(test_lab::state_t& s) {
+	void render_inputs_ncon(test_lab::state_t& s, test_lab::input_form_t& form) {
 		const char* items[] = { "All", "TCP only", "UDP only" };
-		int cur = static_cast<int>(s.u32_a);
-		if (cur < 0 || cur > 2) cur = 0;
-		if (ImGui::Combo("Protocol filter (u32_a)", &cur, items, IM_ARRAYSIZE(items))) {
-			s.u32_a = static_cast<std::uint32_t>(cur);
-		}
-		ImGui::TextDisabled("Enumerates kernel-side TCP/UDP connections (IPv4 + IPv6). Capped at 50 visible rows.");
+		form.combo("Protocol filter (u32_a)", &s.u32_a, items, sizeof(items) / sizeof(items[0]));
+		form.note("Enumerates kernel-side TCP/UDP connections (IPv4 + IPv6). Capped at 50 visible rows.");
 	}
 
 	void run_ncon(test_lab::state_t& s, test_lab::result_t& r) {
@@ -733,15 +726,11 @@ namespace {
 		std::free(req);
 	}
 
-	void render_inputs_ncap(test_lab::state_t& s) {
+	void render_inputs_ncap(test_lab::state_t& s, test_lab::input_form_t& form) {
 		const char* items[] = { "Start", "Stop", "Pause" };
-		int cur = static_cast<int>(s.u32_a);
-		if (cur < 0 || cur > 2) cur = 0;
-		if (ImGui::Combo("Operation (u32_a)", &cur, items, IM_ARRAYSIZE(items))) {
-			s.u32_a = static_cast<std::uint32_t>(cur);
-		}
-		ImGui::InputScalar("Interface index (u32_b, informational)", ImGuiDataType_U32, &s.u32_b, nullptr, nullptr, "%u");
-		ImGui::TextDisabled("0=Start (op=0 in kernel), 1=Stop (op=1), 2=Pause (op=2). WFP capture engine control.");
+		form.combo("Operation (u32_a)", &s.u32_a, items, sizeof(items) / sizeof(items[0]));
+		form.u32("Interface index (u32_b, informational)", &s.u32_b, false);
+		form.note("0=Start (op=0 in kernel), 1=Stop (op=1), 2=Pause (op=2). WFP capture engine control.");
 	}
 
 	void run_ncap(test_lab::state_t& s, test_lab::result_t& r) {
@@ -765,9 +754,9 @@ namespace {
 		r.ok = true;
 	}
 
-	void render_inputs_ncpg(test_lab::state_t& s) {
-		ImGui::InputScalar("Max packets (u32_a, 1-32)", ImGuiDataType_U32, &s.u32_a, nullptr, nullptr, "%u");
-		ImGui::TextDisabled("Drains captured packets from the kernel ring buffer.");
+	void render_inputs_ncpg(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("Max packets (u32_a, 1-32)", &s.u32_a, false);
+		form.note("Drains captured packets from the kernel ring buffer.");
 	}
 
 	void run_ncpg(test_lab::state_t& s, test_lab::result_t& r) {
@@ -893,9 +882,9 @@ namespace {
 		std::free(req);
 	}
 
-	void render_inputs_ndns(test_lab::state_t& s) {
-		ImGui::InputScalar("Max entries (u32_a, 1-64)", ImGuiDataType_U32, &s.u32_a, nullptr, nullptr, "%u");
-		ImGui::TextDisabled("Returns kernel-side DNS query log entries.");
+	void render_inputs_ndns(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("Max entries (u32_a, 1-64)", &s.u32_a, false);
+		form.note("Returns kernel-side DNS query log entries.");
 	}
 
 	void run_ndns(test_lab::state_t& s, test_lab::result_t& r) {
@@ -1073,22 +1062,11 @@ namespace {
 		std::free(req);
 	}
 
-	void render_inputs_nflt(test_lab::state_t& s) {
+	void render_inputs_nflt(test_lab::state_t& s, test_lab::input_form_t& form) {
 		const char* items[] = { "Add (op=0)", "Remove (op=1)", "Clear all (op=2)", "Query count (op=3)" };
-		int cur = static_cast<int>(s.u32_a);
-		if (cur < 0 || cur > 3) cur = 0;
-		if (ImGui::Combo("Operation (u32_a)", &cur, items, IM_ARRAYSIZE(items))) {
-			s.u32_a = static_cast<std::uint32_t>(cur);
-		}
-		char buf[256];
-		std::size_t copy = s.text_a.size();
-		if (copy >= sizeof(buf)) copy = sizeof(buf) - 1u;
-		std::memcpy(buf, s.text_a.data(), copy);
-		buf[copy] = '\0';
-		if (ImGui::InputText("Rule descriptor (text_a)", buf, sizeof(buf))) {
-			s.text_a.assign(buf);
-		}
-		ImGui::TextDisabled("Add format: 'action=<0|1>;direction=<0|1|2>;protocol=<6|17|0>;pid=<u32>;port=<u32>;ip=<a.b.c.d>'. Remove: 'rule_id=<u32>'.");
+		form.combo("Operation (u32_a)", &s.u32_a, items, sizeof(items) / sizeof(items[0]));
+		form.text("Rule descriptor (text_a)", &s.text_a, 256);
+		form.note("Add format: 'action=<0|1>;direction=<0|1|2>;protocol=<6|17|0>;pid=<u32>;port=<u32>;ip=<a.b.c.d>'. Remove: 'rule_id=<u32>'.");
 	}
 
 	void run_nflt(test_lab::state_t& s, test_lab::result_t& r) {
@@ -1220,9 +1198,9 @@ namespace {
 		r.ok = true;
 	}
 
-	void render_inputs_nsts(test_lab::state_t& s) {
+	void render_inputs_nsts(test_lab::state_t& s, test_lab::input_form_t& form) {
 		(void)s;
-		ImGui::TextDisabled("Returns aggregated network counters (no inputs).");
+		form.note("Returns aggregated network counters (no inputs).");
 	}
 
 	void run_nsts(test_lab::state_t& s, test_lab::result_t& r) {
@@ -1269,9 +1247,9 @@ namespace {
 		r.ok = true;
 	}
 
-	void render_inputs_ewfp(test_lab::state_t& s) {
+	void render_inputs_ewfp(test_lab::state_t& s, test_lab::input_form_t& form) {
 		(void)s;
-		ImGui::TextDisabled("Enumerates registered WFP callouts (classifyFn / notifyFn / flowDeleteFn / owning module).");
+		form.note("Enumerates registered WFP callouts (classifyFn / notifyFn / flowDeleteFn / owning module).");
 	}
 
 	void run_ewfp(test_lab::state_t& s, test_lab::result_t& r) {
@@ -1320,9 +1298,9 @@ namespace {
 		std::free(req);
 	}
 
-	void render_inputs_gskt(test_lab::state_t& s) {
-		ImGui::InputScalar("Target PID (0 = all)", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		ImGui::TextDisabled("Walks AFD endpoints owned by the target process.");
+	void render_inputs_gskt(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("Target PID (0 = all)", &s.pid, false);
+		form.note("Walks AFD endpoints owned by the target process.");
 	}
 
 	void run_gskt(test_lab::state_t& s, test_lab::result_t& r) {
@@ -1487,9 +1465,9 @@ namespace {
 		std::free(req);
 	}
 
-	void render_inputs_snbf(test_lab::state_t& s) {
-		ImGui::InputScalar("Max captures (u32_a, 1-16)", ImGuiDataType_U32, &s.u32_a, nullptr, nullptr, "%u");
-		ImGui::TextDisabled("Drains accumulated NDIS NET_BUFFER captures (op=2 query). Use other features to arm a breakpoint first.");
+	void render_inputs_snbf(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("Max captures (u32_a, 1-16)", &s.u32_a, false);
+		form.note("Drains accumulated NDIS NET_BUFFER captures (op=2 query). Use other features to arm a breakpoint first.");
 	}
 
 	void run_snbf(test_lab::state_t& s, test_lab::result_t& r) {
@@ -1631,9 +1609,9 @@ namespace {
 		std::free(req);
 	}
 
-	void render_inputs_dtcp(test_lab::state_t& s) {
+	void render_inputs_dtcp(test_lab::state_t& s, test_lab::input_form_t& form) {
 		(void)s;
-		ImGui::TextDisabled("Walks the TCPIP.SYS connection table (TCB list, owning_module_base, byte counters).");
+		form.note("Walks the TCPIP.SYS connection table (TCB list, owning_module_base, byte counters).");
 	}
 
 	void run_dtcp(test_lab::state_t& s, test_lab::result_t& r) {
@@ -1752,9 +1730,9 @@ namespace {
 		std::free(req);
 	}
 
-	void render_inputs_nifs(test_lab::state_t& s) {
+	void render_inputs_nifs(test_lab::state_t& s, test_lab::input_form_t& form) {
 		(void)s;
-		ImGui::TextDisabled("Enumerates kernel-visible network interfaces (MAC, IPv4/IPv6, MTU, octets).");
+		form.note("Enumerates kernel-visible network interfaces (MAC, IPv4/IPv6, MTU, octets).");
 	}
 
 	void run_nifs(test_lab::state_t& s, test_lab::result_t& r) {
@@ -1807,23 +1785,12 @@ namespace {
 		std::free(req);
 	}
 
-	void render_inputs_nfpr(test_lab::state_t& s) {
-		char buf[64];
-		std::size_t copy = s.text_a.size();
-		if (copy >= sizeof(buf)) copy = sizeof(buf) - 1u;
-		std::memcpy(buf, s.text_a.data(), copy);
-		buf[copy] = '\0';
-		if (ImGui::InputText("Remote IPv4 [a.b.c.d[:port]] (text_a)", buf, sizeof(buf))) {
-			s.text_a.assign(buf);
-		}
-		ImGui::InputScalar("Remote port (u32_a)", ImGuiDataType_U32, &s.u32_a, nullptr, nullptr, "%u");
+	void render_inputs_nfpr(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.text("Remote IPv4 [a.b.c.d[:port]] (text_a)", &s.text_a, 64);
+		form.u32("Remote port (u32_a)", &s.u32_a, false);
 		const char* ops[] = { "Start passive capture (op=0)", "Stop (op=1)", "Query results (op=2)" };
-		int cur = static_cast<int>(s.u32_b);
-		if (cur < 0 || cur > 2) cur = 2;
-		if (ImGui::Combo("Operation (u32_b)", &cur, ops, IM_ARRAYSIZE(ops))) {
-			s.u32_b = static_cast<std::uint32_t>(cur);
-		}
-		ImGui::TextDisabled("Passive TCP/IP stack fingerprint. Start capture, generate traffic to/from the endpoint, then Query.");
+		form.combo("Operation (u32_b)", &s.u32_b, ops, sizeof(ops) / sizeof(ops[0]));
+		form.note("Passive TCP/IP stack fingerprint. Start capture, generate traffic to/from the endpoint, then Query.");
 	}
 
 	void run_nfpr(test_lab::state_t& s, test_lab::result_t& r) {

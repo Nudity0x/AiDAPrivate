@@ -79,15 +79,11 @@ inline std::string format_bytes(const std::vector<uint8_t>& bytes) {
 
 inline std::uint64_t current_target_process_creation_time(std::uint32_t pid) {
 	if (pid == 0) return 0;
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-	return 1;
-#else
 	driver_bridge::identity::live_target_identity_t identity;
 	std::string error;
 	return driver_bridge::identity::capture_live_target_identity(
 		pid, 0, identity, &error)
 		? identity.process.creation_time_100ns : 0;
-#endif
 }
 
 inline bool target_identity_current(std::uint32_t pid,
@@ -150,23 +146,6 @@ inline std::shared_ptr<const patch_snapshot_t> published_snapshot() {
 	return std::atomic_load_explicit(&g_state.publication, std::memory_order_acquire);
 }
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-inline const bool g_preview_patch_publication_initialized = [] {
-	std::lock_guard<std::mutex> lock(g_state.mtx);
-	if (g_state.patches.empty()) {
-		g_state.patches = {
-			{0x00007FF7A4C16A32, {0x75, 0x14}, {0x90, 0x90},
-				"Bypass conditional branch", true, 1720946700, 6420, 1},
-			{0x00007FF7A4C1B420, {0x48, 0x85, 0xC0}, {0xB0, 0x01, 0x90},
-				"Force decrypt success", false, 1720946760, 6420, 1},
-			{0x00007FF7A4C208F0, {0x74, 0x05}, {0xEB, 0x05},
-				"Follow unpacked path", true, 1720946820, 6420, 1}
-		};
-		publish_snapshot_locked();
-	}
-	return true;
-}();
-#endif
 
 inline std::vector<uint8_t> parse_bytes(const std::string& hex_str) {
 	std::vector<uint8_t> out;

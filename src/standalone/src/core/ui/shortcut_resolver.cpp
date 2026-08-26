@@ -14,15 +14,6 @@ constexpr std::size_t k_maximum_chord_strokes = 4;
 constexpr std::uint32_t k_minimum_chord_timeout_ms = 200;
 constexpr std::uint32_t k_maximum_chord_timeout_ms = 5000;
 
-bool valid_stroke(ImGuiKeyChord stroke) noexcept {
-    const auto key = stroke & ~ImGuiMod_Mask_;
-    return key >= ImGuiKey_Tab && key < ImGuiKey_GamepadStart &&
-           key != ImGuiKey_LeftCtrl && key != ImGuiKey_RightCtrl &&
-           key != ImGuiKey_LeftShift && key != ImGuiKey_RightShift &&
-           key != ImGuiKey_LeftAlt && key != ImGuiKey_RightAlt &&
-           key != ImGuiKey_LeftSuper && key != ImGuiKey_RightSuper;
-}
-
 bool scopes_can_overlap(const shortcut_binding_t& lhs,
                         const shortcut_binding_t& rhs) noexcept {
     return lhs.scope_kind == rhs.scope_kind && lhs.scope == rhs.scope;
@@ -68,7 +59,7 @@ shortcut_registration_result_t shortcut_resolver_t::validate(
         return {shortcut_registration_error_t::invalid_sequence,
                 "Shortcut sequence is invalid"};
     for (const auto stroke : binding.sequence.strokes) {
-        if (!valid_stroke(stroke))
+        if (!valid_chord_stroke(stroke))
             return {shortcut_registration_error_t::invalid_sequence,
                     "Shortcut sequence contains an invalid stroke"};
     }
@@ -232,7 +223,7 @@ shortcut_resolution_t shortcut_resolver_t::resolve_exact(
 }
 
 shortcut_resolution_t shortcut_resolver_t::begin_sequence(
-    ImGuiKeyChord stroke,
+    chord_stroke_t stroke,
     bool repeated,
     std::uint64_t timestamp_ms,
     const interaction_context_t& context,
@@ -273,12 +264,12 @@ shortcut_resolution_t shortcut_resolver_t::begin_sequence(
 }
 
 shortcut_resolution_t shortcut_resolver_t::feed(
-    ImGuiKeyChord stroke,
+    chord_stroke_t stroke,
     bool repeated,
     std::uint64_t timestamp_ms,
     const interaction_context_t& context,
     const application_action_registry_t& actions) {
-    if (!valid_stroke(stroke))
+    if (!valid_chord_stroke(stroke))
         return {};
     if (pending_ && (pending_->context_generation != context.generation ||
                      timestamp_ms > pending_->deadline_ms))

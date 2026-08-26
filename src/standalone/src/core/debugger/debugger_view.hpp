@@ -1,12 +1,58 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <string>
 #include <vector>
-#include "transition.hpp"
+
 #include "debugger_interaction_context.hpp"
+#include "debugger_engine.hpp"
+
+namespace aida::ui {
+struct view_operation_result_t;
+namespace application_ui {
+struct retained_entity_context_t;
+}
+}
+namespace aida::infra::executor {
+struct submission_t;
+struct submit_result_t;
+}
+namespace source_debug_service {
+struct definition_t;
+}
 
 namespace debugger_view {
+
+enum class sub_tab_t : int {
+	cpu = 0,
+	breakpoints,
+	memory_map,
+	call_stack,
+	threads,
+	watches,
+	handles,
+	trace_log,
+	strings,
+	bookmarks,
+	modules,
+	patches,
+	seh_chain,
+	cfg,
+	COUNT
+};
+
+struct ui_state_t {
+	sub_tab_t active_tab = sub_tab_t::cpu;
+	sub_tab_t prev_tab = sub_tab_t::cpu;
+};
+
+inline ui_state_t g_ui;
+
+bool is_visible_sub_tab(sub_tab_t tab);
+int visible_sub_tab_count();
 
 enum class execution_command_t : std::uint8_t {
 	launch,
@@ -33,199 +79,161 @@ enum class breakpoint_definition_mode_t : std::uint8_t {
 	hardware_execute
 };
 
+enum class breakpoint_editor_focus_t : std::uint8_t {
+	condition,
+	log_message,
+	auto_continue
+};
+
 struct execution_capability_t {
 	bool enabled = false;
 	const char* disabled_reason = nullptr;
 };
 
-enum class sub_tab_t : int {
-	cpu = 0,
-	breakpoints,
-	memory_map,
-	call_stack,
-	threads,
-	watches,
-	handles,
-	trace_log,
-	strings,
-	bookmarks,
-	modules,
-	patches,
-	seh_chain,
-	cfg,
-	source,
-	COUNT
+enum class context_retention_t : std::uint8_t {
+	current,
+	stale,
+	busy
 };
 
-struct list_panel_state_t {
-	float scroll_y = 0.f;
-	float target_scroll_y = 0.f;
-	int   selected = -1;
-	bool  scrollbar_dragging = false;
-	float scrollbar_drag_offset = 0.f;
+struct mutation_result_t {
+	bool ok = false;
+	bool verified = false;
+	std::string detail;
 };
 
-struct toolbar_state_t {
-	aida::ui::hover_state_t hover[8];
-	aida::ui::press_state_t press[8];
+using mutation_operation_t = std::function<mutation_result_t()>;
+
+enum class context_mutation_t : std::uint8_t {
+	set_instruction_pointer,
+	terminate_thread,
+	close_handle,
+	apply_patch,
+	revert_patch,
+	revert_all_patches,
+	remove_patch,
+	remove_watch,
+	remove_bookmark
 };
 
-struct tab_animator_t {
-	float    direction = 0.f;
-	aida::ui::transition_t slide;
+struct context_mutation_review_t {
+	const char* scope = "the selected debugger item";
+	const char* consequence = "This changes live target state.";
+	debugger_interaction::capability_t capability =
+		debugger_interaction::capability_t::copy;
+	bool advances_generation = true;
 };
 
-struct ui_state_t {
-	sub_tab_t active_tab = sub_tab_t::cpu;
-	sub_tab_t prev_tab   = sub_tab_t::cpu;
-
-	float tab_anim[static_cast<int>(sub_tab_t::COUNT)] = {};
-
-	float tab_scroll_x        = 0.f;
-	float tab_target_scroll_x = 0.f;
-	int   tab_last_ensured    = -1;
-	float underline_x         = 0.f;
-	float underline_w         = 0.f;
-	float underline_vel       = 0.f;
-	float content_fade        = 1.f;
-
-	tab_animator_t tab_animator;
-
-	list_panel_state_t bp_panel;
-	list_panel_state_t callstack_panel;
-	list_panel_state_t threads_panel;
-	list_panel_state_t watch_panel;
-	list_panel_state_t handle_panel;
-	list_panel_state_t trace_panel;
-	list_panel_state_t strings_panel;
-	list_panel_state_t bookmark_panel;
-	list_panel_state_t patches_panel;
-
-	float memmap_scroll_y        = 0.f;
-	float memmap_target_scroll_y = 0.f;
-	int   memmap_selected        = -1;
-
-	float trace_scroll_y        = 0.f;
-	float trace_target_scroll_y = 0.f;
-	int   trace_selected        = -1;
-
-	float strings_scroll_y        = 0.f;
-	float strings_target_scroll_y = 0.f;
-	int   strings_selected        = -1;
-
-	int   list_selected = -1;
-
-	char  string_filter[128] = {};
-	int   string_min_len = 4;
-
-	float panel_sep_phase = 0.f;
-	float empty_phase = 0.f;
-
-	float bp_scroll_y = 0.f;
-	float callstack_scroll_y = 0.f;
-	float watch_scroll_y = 0.f;
-	float bookmark_scroll_y = 0.f;
-	float handle_scroll_y = 0.f;
-
-	float row_hover_anim[64] = {};
-
-	toolbar_state_t toolbar;
-
-	uint32_t prev_thread_state[256] = {};
-	float    thread_state_flash[256] = {};
-
-	float    record_pulse = 0.f;
-
-	char     add_bp_addr_buf[24] = {};
-	bool     add_bp_staged = false;
-	breakpoint_definition_mode_t add_bp_staged_mode =
-		breakpoint_definition_mode_t::software;
-	debugger_interaction::context_t add_bp_staged_context;
-	char     add_watch_buf[96] = {};
-	char     add_bookmark_buf[24] = {};
-	char     add_bookmark_label_buf[64] = {};
-	char     trace_filter_buf[96] = {};
-	bool     trace_freeze_display = false;
-
-	list_panel_state_t cpu_panel;
-	float    cpu_scroll_y = 0.f;
-	int      cpu_edit_reg_idx = -1;
-	char     cpu_edit_value_buf[24] = {};
-	bool     cpu_edit_popup_open = false;
-	debugger_interaction::context_t cpu_edit_context;
-
-	uint64_t cpu_prev_reg_values[32] = {};
-	float    cpu_reg_flash[32] = {};
-	bool     cpu_prev_reg_initialized = false;
-	float    cpu_reg_scroll_y = 0.f;
-	float    cpu_stack_scroll_y = 0.f;
-	int      cpu_stack_selected = -1;
-	int      cpu_disasm_selected = -1;
-	uint64_t cpu_disasm_anchor_rip = 0;
-	int      source_definition_selected = -1;
-	int      bp_edit_idx = -1;
-	char     bp_edit_condition_buf[160] = {};
-	char     bp_edit_log_buf[160] = {};
-	bool     bp_edit_auto_continue = false;
-	bool     bp_edit_popup_open = false;
-	bool     bp_edit_identity_retained = false;
-	debugger_interaction::context_t bp_edit_context;
-	std::uint64_t bp_edit_breakpoints_generation = 0;
-	std::uint64_t bp_edit_fingerprint = 0;
-	std::uint64_t bp_edit_address = 0;
-	std::uint64_t bp_edit_size = 0;
-	int      bp_edit_type = 0;
-	std::string bp_edit_name;
-	std::string bp_edit_original_condition;
-	std::string bp_edit_original_log;
-	bool     bp_edit_original_auto_continue = false;
-
-	int      handle_close_idx = -1;
-	uint64_t handle_close_value = 0;
-	std::string handle_close_type;
-	std::string handle_close_name;
-	bool     handle_close_popup_open = false;
-	debugger_interaction::context_t handle_close_context;
-
-	int      thread_kill_idx = -1;
-	uint32_t thread_kill_tid = 0;
-	bool     thread_kill_popup_open = false;
-	debugger_interaction::context_t thread_kill_context;
-
-	uint64_t cfg_last_built_addr = 0;
-
-	bool     seh_break_request_active = false;
-	bool     patch_stage_open = false;
-	std::uint64_t patch_stage_address = 0;
-	std::uint64_t patch_stage_extent = 0;
-	char     patch_stage_bytes_buf[12288] = {};
-	char     patch_stage_description_buf[256] = {};
-	std::vector<std::uint8_t> patch_stage_parsed_bytes;
-	bool     patch_stage_parse_valid = false;
-	bool     patch_stage_exact = false;
-	debugger_interaction::context_t patch_stage_context;
-	std::vector<std::uint8_t> patch_stage_expected_before;
+struct breakpoint_edit_state_t {
+	int idx = -1;
+	debugger_interaction::context_t context;
+	std::uint64_t breakpoints_generation = 0;
+	std::uint64_t fingerprint = 0;
+	std::uint64_t address = 0;
+	std::uint64_t size = 0;
+	int type = 0;
+	std::string name;
+	std::string original_condition;
+	std::string original_log;
+	bool original_auto_continue = false;
+	bool identity_retained = false;
+	breakpoint_editor_focus_t focus = breakpoint_editor_focus_t::condition;
 };
 
-inline ui_state_t g_ui;
+struct patch_stage_review_t {
+	debugger_interaction::context_t context;
+	std::uint64_t address = 0;
+	std::uint64_t extent = 0;
+	std::string description;
+	bool exact = false;
+	std::vector<std::uint8_t> expected_before;
+	std::vector<std::uint8_t> initial_bytes;
+};
 
-bool is_visible_sub_tab(sub_tab_t tab);
-int visible_sub_tab_count();
+struct code_cave_entry_t {
+	std::uint64_t address = 0;
+	std::size_t size = 0;
+	std::string module;
+};
 
-void render(float pos_x, float pos_y, float width, float height,
-			float alpha, float accent_r, float accent_g, float accent_b);
+struct code_cave_publication_view_t {
+	std::uint64_t generation = 0;
+	std::uint32_t target_pid = 0;
+	std::uint64_t target_stop_generation = 0;
+	std::vector<code_cave_entry_t> results;
+	std::string detail;
+};
 
-void render_pane(sub_tab_t pane, float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b,
-	bool show_execution_controls = false, bool show_status = false);
-void render_execution_controls(float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b);
-void render_global_target_dialog();
-void render_global_dialogs();
+// Host-UI seam installed by the Qt domain (install_debugger_domain). The
+// backend never includes Qt headers; every presentation/detail that needs the
+// shell routes through these hooks. All hooks run on the GUI thread.
+struct host_ui_hooks_t {
+	std::function<aida::ui::view_operation_result_t(const char* view_id)>
+		open_or_focus;
+	std::function<bool(const char* view_id)> is_open;
+	std::function<aida::ui::view_operation_result_t(const char* view_id)>
+		close_view;
+	std::function<void(const std::string& text)> clipboard_set;
+	std::function<void()> request_spawn_dialog;
+	std::function<void(const std::string& executable_path)>
+		request_spawn_dialog_with_path;
+	std::function<bool()> spawn_dialog_open;
+	std::function<void(const debugger_interaction::context_t& context,
+		const std::string& register_name, std::uint64_t value)>
+		present_register_edit;
+	std::function<void(const debugger_interaction::context_t& context,
+		int index, int focus)> present_breakpoint_edit;
+	std::function<void(const debugger_interaction::context_t& context,
+		std::uint64_t address, std::uint64_t size, std::uint32_t old_protect)>
+		present_change_protection;
+	std::function<void(int mutation,
+		const debugger_interaction::context_t& context)>
+		present_context_mutation_review;
+	std::function<void(const patch_stage_review_t& review)> present_patch_stage;
+	std::function<void()> present_code_caves;
+	std::function<std::optional<std::string>(const std::string& title,
+		const std::string& default_name, const std::string& filter)>
+		pick_save_file;
+	std::function<void(const std::string& expression)> stage_watch_expression;
+	std::function<void(int patch_index)> focus_patch_row;
+	std::function<void(std::uint64_t address, int mode,
+		const debugger_interaction::context_t& context)>
+		present_breakpoint_stage;
+};
+
+void install_host_ui_hooks(host_ui_hooks_t hooks);
+bool host_ui_hooks_installed() noexcept;
+
+// Task admission (verbatim port: Task Center ownership registration gates the
+// worker body's admission).
+bool register_debugger_task(
+	const aida::infra::executor::submit_result_t& submitted,
+	const char* owner_view, const char* owner_action, const char* label,
+	bool cancellable = false);
+aida::infra::executor::submit_result_t submit_owned_debugger_task(
+	aida::infra::executor::submission_t submission, const char* owner_view,
+	const char* owner_action, const char* label, bool cancellable = false);
+
+// Execution commands (CAS single-flight, worker, verbatim completion toasts).
 execution_capability_t execution_capability(execution_command_t command);
 bool execute_command(execution_command_t command, std::string* error = nullptr);
+bool execution_command_pending() noexcept;
+bool target_mutation_pending() noexcept;
+
+// Mutation pipeline (CAS + stop-generation fencing + readback verification).
+bool queue_debugger_mutation(const char* label, const char* action,
+	debugger_interaction::context_t context, mutation_operation_t operation,
+	bool advance_generation = true);
+
+// Patch panel commands.
 execution_capability_t patch_panel_capability(patch_panel_command_t command);
-bool execute_patch_panel_command(patch_panel_command_t command, std::string* error = nullptr);
+bool execute_patch_panel_command(patch_panel_command_t command,
+	std::string* error = nullptr);
+bool dispatch_patch_panel_command(patch_panel_command_t command,
+	std::string* error = nullptr);
+
+// Patch staging (entry points called cross-domain; the review is presented by
+// the installed hook).
 bool stage_patch_review(std::uint64_t address, std::uint64_t extent,
 	const std::string& description, std::string* error = nullptr);
 bool stage_patch_review(const debugger_interaction::context_t& expected_context,
@@ -234,8 +242,8 @@ bool stage_patch_review(const debugger_interaction::context_t& expected_context,
 bool stage_exact_patch_review(std::uint64_t address,
 	const std::vector<std::uint8_t>& expected_before,
 	const std::vector<std::uint8_t>& reviewed_after,
-	std::uint32_t expected_pid,
-	const std::string& description, std::string* error = nullptr);
+	std::uint32_t expected_pid, const std::string& description,
+	std::string* error = nullptr);
 bool stage_nop_review(std::uint64_t address, std::uint64_t extent,
 	std::string* error = nullptr);
 bool stage_nop_review(const debugger_interaction::context_t& expected_context,
@@ -243,6 +251,15 @@ bool stage_nop_review(const debugger_interaction::context_t& expected_context,
 bool stage_breakpoint_definition(
 	const debugger_interaction::context_t& expected_context,
 	breakpoint_definition_mode_t mode, std::string* error = nullptr);
+
+// Patch review commit (the queued rollback-byte capture; the dialog calls this
+// on Apply).
+bool parse_patch_bytes(const std::string& text, std::vector<std::uint8_t>& out);
+bool commit_patch_stage_review(const patch_stage_review_t& review,
+	const std::vector<std::uint8_t>& bytes, const std::string& description,
+	std::string* error = nullptr);
+
+// Address mutations (analysis-side entry points; retained identity checked).
 execution_capability_t address_mutation_capability(std::uint64_t address,
 	bool toggle_breakpoint, std::uint32_t expected_pid = 0);
 execution_capability_t address_mutation_capability(
@@ -250,46 +267,82 @@ execution_capability_t address_mutation_capability(
 	bool toggle_breakpoint);
 bool queue_run_to_address(std::uint64_t address, std::uint32_t expected_pid,
 	std::string* error = nullptr);
-bool queue_run_to_address(const debugger_interaction::context_t& expected_context,
+bool queue_run_to_address(
+	const debugger_interaction::context_t& expected_context,
 	std::string* error = nullptr);
 bool queue_toggle_breakpoint(std::uint64_t address, std::uint32_t expected_pid,
 	std::string* error = nullptr);
-bool queue_toggle_breakpoint(const debugger_interaction::context_t& expected_context,
+bool queue_toggle_breakpoint(
+	const debugger_interaction::context_t& expected_context,
 	std::string* error = nullptr);
 
-void render_cpu_pane(float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b);
-void render_registers_pane(float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b);
-void render_stack_pane(float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b);
-void render_breakpoints_pane(float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b);
-void render_memory_map_pane(float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b);
-void render_call_stack_pane(float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b);
-void render_threads_pane(float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b);
-void render_watches_pane(float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b);
-void render_handles_pane(float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b);
-void render_trace_pane(float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b);
-void render_strings_pane(float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b);
-void render_bookmarks_pane(float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b);
-void render_modules_pane(float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b);
-void render_patches_pane(float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b);
-void render_seh_pane(float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b);
-void render_cfg_pane(float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b);
-void render_source_pane(float pos_x, float pos_y, float width, float height,
-	float alpha, float accent_r, float accent_g, float accent_b);
+// Reviewed context mutations (confirm-dialog flow): the static review table +
+// the verbatim queued bodies.
+context_mutation_review_t review_context_mutation(
+	context_mutation_t mutation) noexcept;
+bool execute_context_mutation(context_mutation_t mutation,
+	const debugger_interaction::context_t& context);
+
+// Breakpoint identity retention (verbatim index + fingerprint +
+// breakpoints_generation re-check under bp_mutex with try_lock busy reason).
+std::uint64_t breakpoint_fingerprint(
+	const debugger_engine::breakpoint_t& breakpoint) noexcept;
+bool retain_breakpoint_edit(breakpoint_edit_state_t& state, int index,
+	const debugger_engine::breakpoint_t& breakpoint,
+	const debugger_interaction::context_t& context,
+	breakpoint_editor_focus_t focus);
+bool breakpoint_edit_is_current(const breakpoint_edit_state_t& state,
+	std::string& reason);
+bool submit_breakpoint_edit(const breakpoint_edit_state_t& state,
+	const std::string& condition, const std::string& log_text,
+	bool auto_continue);
+
+// Retention evaluation for the confirm dialogs (per-kind staleness/busy).
+context_retention_t context_item_retention(
+	const debugger_interaction::context_t& context);
+
+// Entity actions (the retained contract + the real invoke dispatch; the menu
+// bridge executes the invoke handlers on the GUI thread).
+aida::ui::application_ui::retained_entity_context_t
+	build_debugger_entity_actions(const debugger_interaction::context_t& context,
+		bool include_selected_set = true);
+aida::ui::application_ui::retained_entity_context_t
+	build_source_breakpoint_actions(
+		const source_debug_service::definition_t& definition,
+		std::uint64_t publication_generation);
+
+// Navigation + clipboard helpers (hook-driven).
+bool jump_to_disasm(std::uint64_t address);
+bool jump_to_hex(std::uint64_t address, std::size_t bytes);
+void copy_to_clipboard(const std::string& text);
+void copy_address_to_clipboard(std::uint64_t address);
+
+// Status strip helpers (shared with the Qt status strip).
+const char* debugger_status_label(debugger_engine::dbg_status_t status) noexcept;
+
+// Export/dump workers (the file pick routes through the hook).
+bool write_file_atomic_exact(const std::string& destination,
+	const void* bytes, std::size_t size, std::string& error);
+void dump_memory_region(const debugger_interaction::context_t& context);
+void dump_module_bytes(std::uint64_t base, std::uint64_t size,
+	const std::string& name);
+bool request_patchset_save(std::string* error);
+
+// Code caves (single-flight pending + immutable publication).
+std::shared_ptr<const code_cave_publication_view_t> code_cave_publication();
+bool code_cave_search_pending();
+bool request_code_cave_search(const std::string& module_filter,
+	std::size_t minimum_size, std::string* error);
+bool stage_code_cave_review(std::uint64_t publication_generation, int index,
+	std::string* error);
+
+// Watch expression display helper (verbatim evaluator for the Resolved Address
+// column).
+std::uint64_t evaluate_watch_expression(const std::string& expression,
+	const debugger_engine::register_set_t& registers, bool& deref_out,
+	bool& valid_out);
+std::uint64_t parse_hex_address(const std::string& text);
+std::uint64_t resolve_register_token(const std::string& token,
+	const debugger_engine::register_set_t& registers);
 
 }

@@ -1,15 +1,10 @@
 #pragma once
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-#include "../../preview/shell_preview_platform.hpp"
-#include "../../preview/re_hubs_preview_adapter.hpp"
-#else
 #include "standalone_driver.hpp"
 #include "../infra/executor.hpp"
 #include "../scanner/scanner_async_io.hpp"
 #include "../ui/task_center.hpp"
 #include "../../helpers/diag_log.hpp"
-#endif
 
 #include <algorithm>
 #include <atomic>
@@ -448,71 +443,6 @@ inline layout_validation_t validate_structure(int structure_index) {
 	return validate_structure_locked(g_state.structs[static_cast<std::size_t>(structure_index)]);
 }
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-inline void ensure_preview_fixture() {
-	std::lock_guard<std::mutex> lock(g_state.mtx);
-	if (!g_state.structs.empty())
-		return;
-	struct_def_t context;
-	context.name = "IMAGE_RUNTIME_CONTEXT";
-	context.fields = {
-		{"image_base", field_type_t::pointer, 0x00, 8, 1, -1,
-			std::vector<int>{}, true, -1, "Mapped image base", 0, 0, 0,
-			std::string{}, 0, 0, 0},
-		{"entry_point", field_type_t::pointer, 0x08, 8, 1, -1,
-			std::vector<int>{}, true, -1, "Resolved entry point", 0, 0, 0,
-			std::string{}, 0, 0, 0},
-		{"image_size", field_type_t::uint32, 0x10, 4, 1, -1,
-			std::vector<int>{}, false, -1, "Size of image", 0, 0, 0,
-			std::string{}, 0, 0, 0},
-		{"machine", field_type_t::uint16, 0x14, 2, 1, -1,
-			std::vector<int>{}, false, -1, "PE machine type", 0, 0, 0,
-			std::string{}, 0, 0, 0},
-		{"section_count", field_type_t::uint16, 0x16, 2, 1, -1,
-			std::vector<int>{}, false, -1, "Number of sections", 0, 0, 0,
-			std::string{}, 0, 0, 0},
-		{"flags", field_type_t::uint32, 0x18, 4, 1, -1,
-			std::vector<int>{}, false, -1, "Analysis flags", 0, 0, 0,
-			std::string{}, 0, 0, 0},
-		{"module_name", field_type_t::ascii_string, 0x20, 16, 1, -1,
-			std::vector<int>{}, false, -1, "Target module", 0, 0, 0,
-			std::string{}, 0, 0, 0}
-	};
-	context.total_size = 0x30;
-	struct_def_t node;
-	node.name = "CONTROL_FLOW_NODE";
-	node.fields = {
-		{"address", field_type_t::pointer, 0x00, 8, 1, -1,
-			std::vector<int>{}, true, -1, "Block start", 0, 0, 0,
-			std::string{}, 0, 0, 0},
-		{"successors", field_type_t::pointer, 0x08, 8, 1, -1,
-			std::vector<int>{}, true, -1, "Successor array", 0, 0, 0,
-			std::string{}, 0, 0, 0},
-		{"successor_count", field_type_t::uint32, 0x10, 4, 1, -1,
-			std::vector<int>{}, false, -1, "Outgoing edge count", 0, 0, 0,
-			std::string{}, 0, 0, 0},
-		{"instruction_count", field_type_t::uint32, 0x14, 4, 1, -1,
-			std::vector<int>{}, false, -1, "Instruction count", 0, 0, 0,
-			std::string{}, 0, 0, 0},
-		{"flags", field_type_t::uint64, 0x18, 8, 1, -1,
-			std::vector<int>{}, false, -1, "Node flags", 0, 0, 0,
-			std::string{}, 0, 0, 0},
-		{"confidence", field_type_t::float32, 0x20, 4, 1, -1,
-			std::vector<int>{}, false, -1, "Recovery confidence", 0, 0, 0,
-			std::string{}, 0, 0, 0}
-	};
-	node.total_size = 0x24;
-	context.stable_id = allocate_stable_id_locked();
-	for (auto& field : context.fields)
-		field.stable_id = allocate_stable_id_locked();
-	node.stable_id = allocate_stable_id_locked();
-	for (auto& field : node.fields)
-		field.stable_id = allocate_stable_id_locked();
-	g_state.structs = {std::move(context), std::move(node)};
-	g_state.active_struct = 0;
-	g_state.base_address = 0x0000000140005000ULL;
-}
-#endif
 
 inline const char* field_type_name(field_type_t t) {
 	static const char* names[] = {
@@ -2020,38 +1950,6 @@ inline bool user_catalog_redo(std::string& label, std::string& error) {
 }
 
 inline void refresh_values() {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-	ensure_preview_fixture();
-	std::lock_guard<std::mutex> lock(g_state.mtx);
-	if (!valid_index(g_state.active_struct, g_state.structs.size()))
-		return;
-	const auto& definition = g_state.structs[static_cast<std::size_t>(g_state.active_struct)];
-	g_state.cached_values.resize(definition.fields.size());
-	const std::uint64_t sequence = g_state.refresh_seq.fetch_add(1) + 1;
-	for (std::size_t index = 0; index < definition.fields.size(); ++index) {
-		const auto& field = definition.fields[index];
-		const std::size_t length = (std::max)(std::size_t{1},
-			field_scalar_size_locked(field) * field.array_count);
-		std::vector<std::uint8_t> bytes(length);
-		for (std::size_t offset = 0; offset < length; ++offset)
-			bytes[offset] = static_cast<std::uint8_t>(
-				(g_state.base_address + field.offset + offset + sequence * 3) & 0xFFu);
-		if (field.type == field_type_t::ascii_string) {
-			static constexpr char module[] = "AiDA_Target.exe";
-			std::fill(bytes.begin(), bytes.end(), 0);
-			std::copy_n(module, (std::min)(sizeof(module) - 1, bytes.size()), bytes.begin());
-		}
-		auto& value = g_state.cached_values[index];
-		value.changed = !value.raw_bytes.empty() && value.raw_bytes != bytes;
-		value.raw_bytes = std::move(bytes);
-		value.display_text = format_field_value_locked(value.raw_bytes, field);
-	}
-	g_state.last_completed_seq.store(sequence, std::memory_order_release);
-	g_state.refresh_in_flight.store(false, std::memory_order_release);
-	aida::preview::re_hubs::action(aida::preview::re_hubs::domain_t::types, 6,
-		"refresh_values", definition.name);
-	return;
-#else
 	if (!driver_bridge::is_loaded()) {
 		diag::log_tagged_fmt("dissector",
 			"refresh_values skipped reason='driver_not_loaded'");
@@ -2167,19 +2065,9 @@ inline void refresh_values() {
 			static_cast<unsigned long long>(base), total_size, field_count,
 			static_cast<unsigned long long>(seq));
 	}
-#endif
 }
 
 inline std::string auto_detect_type(uint64_t address, std::size_t size) {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-	if (size >= 16)
-		return "byte_array";
-	if ((address & 7u) == 0)
-		return "pointer";
-	if ((address & 3u) == 0)
-		return "uint32";
-	return "uint8";
-#else
 	if (!driver_bridge::is_loaded()) return "unknown";
 	if (size == 0) size = 8;
 	std::vector<uint8_t> bytes;
@@ -2215,27 +2103,8 @@ inline std::string auto_detect_type(uint64_t address, std::size_t size) {
 		return "ascii_string";
 
 	return "byte_array";
-#endif
 }
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-inline bool write_preview_value(int field_index, const std::string& text) {
-	std::lock_guard<std::mutex> lock(g_state.mtx);
-	if (!valid_index(g_state.active_struct, g_state.structs.size()))
-		return false;
-	const auto& definition = g_state.structs[static_cast<std::size_t>(g_state.active_struct)];
-	if (!valid_index(field_index, definition.fields.size()))
-		return false;
-	g_state.cached_values.resize(definition.fields.size());
-	auto& value = g_state.cached_values[static_cast<std::size_t>(field_index)];
-	value.display_text = text;
-	value.raw_bytes.assign(text.begin(), text.end());
-	value.changed = true;
-	aida::preview::re_hubs::action(aida::preview::re_hubs::domain_t::types, 6,
-		"write_field", definition.fields[static_cast<std::size_t>(field_index)].name);
-	return true;
-}
-#endif
 
 inline nlohmann::json schema_json_locked() {
 	nlohmann::json root = {
@@ -2474,20 +2343,13 @@ inline bool deserialize_schema(const std::string& encoded, std::string& error,
 }
 
 inline std::string durable_schema_path() {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-	return {};
-#else
 	const char* appdata = std::getenv("APPDATA");
 	if (!appdata || !*appdata)
 		return {};
 	return (std::filesystem::path(appdata) / "AiDA" / "Standalone" / "types" /
 		"dissector_schema_v3.json").string();
-#endif
 }
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-inline std::string g_preview_durable_schema;
-#endif
 
 inline bool request_persistence(bool save,
 	std::shared_ptr<catalog_transaction_snapshot_t> transactional_rollback = {},
@@ -2507,22 +2369,6 @@ inline bool request_persistence(bool save,
 		g_state.persistence_error = false;
 		g_state.persistence_status = save ? "Saving structure schema..." : "Loading structure schema...";
 	}
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-	std::string error;
-	if (save)
-		g_preview_durable_schema = serialize_schema();
-	const bool success = save || (!g_preview_durable_schema.empty() &&
-		deserialize_schema(g_preview_durable_schema, error));
-	{
-		std::lock_guard<std::mutex> lock(g_state.mtx);
-		g_state.persistence_error = !success;
-		g_state.persistence_status = success ? (save ? "Structure schema saved" : "Structure schema loaded") :
-			(error.empty() ? "No saved structure schema exists" : error);
-		g_state.persistence_cancellation.reset();
-	}
-	g_state.persistence_in_flight.store(false, std::memory_order_release);
-	return success;
-#else
 	const std::string path = durable_schema_path();
 	if (path.empty()) {
 		const bool rolled_back = !save || !transactional_rollback ||
@@ -2626,7 +2472,6 @@ inline bool request_persistence(bool save,
 	static_cast<void>(aida::ui::task_center::register_executor_job(submitted.task_id,
 		std::move(registration)));
 	return true;
-#endif
 }
 
 inline bool request_save_schema() {

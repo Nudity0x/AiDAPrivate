@@ -21,9 +21,11 @@ For serious crash, hang, Test Lab, MCP startup, or driver-backed debugging tasks
 
 **SUBAGENTS ARE FORBIDDEN FROM BUILDING. NEVER. UNDER ANY CIRCUMSTANCE.**
 
-**SUBAGENTS ARE FORBIDDEN FROM USING THE WRITE TOOL. EVER.** Subagents modify files ONLY with the Edit tool; deletions happen via bash (`git rm` / `Remove-Item`). Bulk mechanical transforms may be done with a script created under `%TEMP%` (never in the repo) and verified hunk-by-hunk on one file before running the rest. This rule exists because a subagent once overwrote `helpers.cpp` with a Write call.
+**SUBAGENTS: THE WRITE TOOL IS FORBIDDEN ON ALREADY-EXISTING FILES — EVER.** Using Write on an existing file replaces ALL of its contents; that is the entire reason for the rule (a subagent once overwrote `helpers.cpp` with a Write call). Subagents modify existing files ONLY with the Edit tool; deletions happen via bash (`git rm` / `Remove-Item`). **Write IS allowed — and expected — for creating NEW files** (e.g. plan files under `plans/`, new source files the host assigned). Before any Write, the subagent must verify the target does not already exist. Bulk mechanical transforms may be done with a script created under `%TEMP%` (never in the repo) and verified hunk-by-hunk on one file before running the rest.
 
-**SUBAGENTS ARE FORBIDDEN FROM GIT MUTATIONS.** No `git commit`/`add`/`push`/`reset`/`rebase`/`stash`. Only `git rm` for deletions is allowed. The host AI is the ONLY git actor, and the owner wants the host to **commit and push after every wave of work**.
+**SUBAGENTS ARE FORBIDDEN FROM GIT MUTATIONS.** No `git commit`/`add`/`push`/`reset`/`rebase`/`stash`. Only `git rm` for deletions is allowed.
+
+**THE HOST AI IS FORBIDDEN FROM GIT MUTATIONS. NEVER run `git commit`, `git add`, `git push`, `git reset`, `git rebase`, `git stash`, `git commit --amend`, force-push, or any other git mutation — EVER, under any circumstance, even after completing a wave of work. There is NO standing instruction to commit or push; that instruction was permanently revoked in August 2026. The owner performs all commits and pushes personally. If a commit seems needed, stage nothing and tell the owner the working tree is ready for them to commit.**
 
 - Subagents are scoped to: **implement / code / think / investigate / design / audit / research**. That is the entire allowed surface.
 - When dispatching, explicitly tell the subagent: **Do not build. Do not run cmake, msbuild, ninja, or vcvars. Do not use the Write tool. Do not run git mutations.**
@@ -185,7 +187,7 @@ Key files:
 - `src/standalone/src/core/tools/standalone_tools_fwd.hpp`: registration surface for MCP/tool domains.
 - `src/standalone/src/core/mcp/mcp_standalone.cpp`: local MCP server, bound to `127.0.0.1`.
 - `src/standalone/src/core/settings/standalone_settings.hpp`: settings schema, provider profiles, sandbox/MCP config, DPAPI/fallback obfuscation for user secrets.
-- `src/standalone/src/resources/aida_embedded.rc.in` and `src/standalone/src/core/ui/embedded_resources.hpp`: embedded `libz3.dll` and Ghidra spec resources; resource IDs must stay in sync.
+- `src/standalone/src/core/ui/embedded_resources.hpp` / `.cpp`: Ghidra spec extraction. The four specs ship in qrc (`src/standalone/resources/aida_ghidra.qrc.in` → `:/ghidra/{x86-64.sla,x86-64.pspec,x86-64-win.cspec,x86.ldefs}`, configured/compiled via `qt6_add_resources` in CMakeLists.txt); `embedded_resources.cpp` reads them via `QResource::uncompressedData()` and writes the same temp-dir files (sleigh needs filesystem paths). The c03 closure keeps its own Qt-free `embedded_resources::extract_ghidra_specs()`/`ghidra_spec_resource_count()` definitions in `tests/c03/testlab_runtime/safe_headless_runtime_bridges.cpp` (faithful "no embedded specs in this module" behavior). `libz3.dll` staging is the separate POST_BUILD copy step (not part of these files).
 
 Rules:
 - Windows-first C++ with many Win32 APIs, `#pragma comment(lib, ...)` dependencies, and header-heavy modules.
@@ -229,4 +231,4 @@ Before final response:
 - For library/API changes, mention Context7 docs consulted when relevant.
 - For symbol-level code work, mention Serena navigation/refactoring used when relevant.
 - Report any checks that could not be run.
-- The host AI commits and pushes after every wave of work (owner's standing instruction).
+- NEVER commit or push. All git mutations are forbidden for the host AI and subagents; the owner commits and pushes personally.

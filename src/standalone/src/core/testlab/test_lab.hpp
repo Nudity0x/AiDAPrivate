@@ -1,5 +1,7 @@
 #pragma once
 
+#include "test_lab_form.hpp"
+
 #include <atomic>
 #include <cstdint>
 #include <cstring>
@@ -77,7 +79,7 @@ namespace test_lab {
 		result.outcome = result.ok ? outcome_e::passed : (result.skipped ? outcome_e::not_run : outcome_e::failed);
 	}
 
-	using render_inputs_fn = void(*)(state_t&);
+	using render_inputs_fn = void(*)(state_t&, input_form_t&);
 	using run_fn = void(*)(state_t&, result_t&);
 
 	struct feature_t {

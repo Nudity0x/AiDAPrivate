@@ -3,7 +3,7 @@
 #include "debugger_engine.hpp"
 #include "debugger_interaction_context.hpp"
 #include "../editor/programming_document_service.hpp"
-#include "../ui/application_view_registry.hpp"
+#include "../ui/application_ui_runtime.hpp"
 #include "../ui/task_center.hpp"
 #include "../disasm/disasm_view.hpp"
 #include "../../helpers/globals.h"
@@ -986,12 +986,12 @@ void begin_frame()
 				static_cast<int>(location.line - 1), 0));
 			const auto disassembly = disasm_view::capture_selected_workspace();
 			if (disassembly) {
-				disasm_view::goto_address(location.address, disassembly);
-				static_cast<void>(aida::ui::application_views::open_or_focus(
-					aida::ui::stable_view_id_t("document.disassembly")));
-			}
-			static_cast<void>(aida::ui::application_views::open_or_focus(
-				aida::ui::stable_view_id_t("view.debug.source")));
+			disasm_view::goto_address(location.address, disassembly);
+			static_cast<void>(aida::ui::application_ui::execute_action(
+				"view.focus.document.disassembly", aida::ui::action_invocation_source_t::command_palette));
+		}
+		static_cast<void>(aida::ui::application_ui::execute_action(
+			"view.focus.view.debug.source", aida::ui::action_invocation_source_t::command_palette));
 		}
 		rt.consumed_navigation_generation.store(navigation,
 			std::memory_order_release);
@@ -1151,8 +1151,8 @@ bool request_open_source(const std::string& file_path, std::uint32_t line,
 		if (error) *error = "The source document open request was rejected";
 		return false;
 	}
-	static_cast<void>(aida::ui::application_views::open_or_focus(
-		aida::ui::stable_view_id_t("document.code")));
+	static_cast<void>(aida::ui::application_ui::execute_action(
+		"view.focus.document.code", aida::ui::action_invocation_source_t::command_palette));
 	return true;
 }
 
@@ -1184,8 +1184,8 @@ bool request_open_current_disassembly(std::string* error)
 		return false;
 	}
 	disasm_view::goto_address(current->current.address, context);
-	static_cast<void>(aida::ui::application_views::open_or_focus(
-		aida::ui::stable_view_id_t("document.disassembly")));
+	static_cast<void>(aida::ui::application_ui::execute_action(
+		"view.focus.document.disassembly", aida::ui::action_invocation_source_t::command_palette));
 	return true;
 }
 

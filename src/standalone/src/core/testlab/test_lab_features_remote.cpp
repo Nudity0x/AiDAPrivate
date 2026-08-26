@@ -2,7 +2,6 @@
 #include "test_lab_format.hpp"
 #include "../../../../driver/comm.h"
 #include "../runtime/standalone_driver.hpp"
-#include "imgui/imgui.h"
 
 #include <atomic>
 #include <cstdint>
@@ -95,14 +94,12 @@ namespace {
 		r.parsed.push_back({ label, buf });
 	}
 
-	void render_inputs_rc(test_lab::state_t& s) {
-		ImGui::InputScalar("PID", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		ImGui::InputScalar("Function Address (addr)", ImGuiDataType_U64, &s.addr, nullptr, nullptr, "0x%016llX",
-			ImGuiInputTextFlags_CharsHexadecimal);
-		ImGui::InputScalar("Arg1 (u64_a)", ImGuiDataType_U64, &s.u64_a, nullptr, nullptr, "0x%016llX",
-			ImGuiInputTextFlags_CharsHexadecimal);
-		ImGui::TextDisabled("Issues a kernel-queued remote call. DTB and scratch buffer are auto-resolved via DTB+AM IOCTLs.");
-		ImGui::TextDisabled("Returns a numeric call_id to be passed to CR for retrieval.");
+	void render_inputs_rc(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("PID", &s.pid, false);
+		form.u64("Function Address (addr)", &s.addr, true);
+		form.u64("Arg1 (u64_a)", &s.u64_a, true);
+		form.note("Issues a kernel-queued remote call. DTB and scratch buffer are auto-resolved via DTB+AM IOCTLs.");
+		form.note("Returns a numeric call_id to be passed to CR for retrieval.");
 	}
 
 	void run_rc(test_lab::state_t& s, test_lab::result_t& r) {
@@ -183,9 +180,9 @@ namespace {
 		r.ok = true;
 	}
 
-	void render_inputs_cr(test_lab::state_t& s) {
-		ImGui::InputScalar("Call ID (u32_a)", ImGuiDataType_U32, &s.u32_a, nullptr, nullptr, "%u");
-		ImGui::TextDisabled("Looks up the DTB/result-address bound when RC was issued, then reads the call result.");
+	void render_inputs_cr(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("Call ID (u32_a)", &s.u32_a, false);
+		form.note("Looks up the DTB/result-address bound when RC was issued, then reads the call result.");
 	}
 
 	void run_cr(test_lab::state_t& s, test_lab::result_t& r) {

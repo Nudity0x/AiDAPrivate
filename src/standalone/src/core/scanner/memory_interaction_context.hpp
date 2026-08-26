@@ -107,6 +107,5 @@ std::uint64_t selection_generation();
 bool is_current(const context_t& context, const runtime_t& runtime);
 capability_result_t evaluate(capability_t capability,
 	const context_t& context, const runtime_t& runtime);
-bool context_key_pressed();
 
 }

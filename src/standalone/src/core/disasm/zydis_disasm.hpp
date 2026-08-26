@@ -1,11 +1,6 @@
 
 #pragma once
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-#include "../../preview/shell_preview_platform.hpp"
-#else
 #include <windows.h>
-#include "../../helpers/win32_dialog.hpp"
-#endif
 #include <Zydis/Zydis.h>
 
 #include <vector>
@@ -536,23 +531,6 @@ namespace disasm
             return true;
         return longest_zero_run >= 256 || (bytes.size() >= 256 && zero_count * 100 >= bytes.size() * 90);
     }
-
-    inline std::string open_file_dialog(HWND owner)
-    {
-        std::string buf(32768, '\0');
-        static const char k_filter[] =
-            "PE Files (*.exe;*.dll;*.sys;*.bin)\0*.exe;*.dll;*.sys;*.bin\0"
-            "All files (*.*)\0*.*\0\0";
-        if (win32_dialog::show_open_file_dialog(owner,
-                "Open PE File",
-                k_filter,
-                buf.data(), buf.size(),
-                "disasm::open_file_dialog"))
-            return std::string(buf.c_str());
-        return {};
-    }
-
-
 
 
 

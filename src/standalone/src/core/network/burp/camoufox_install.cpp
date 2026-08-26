@@ -9,7 +9,6 @@
 #include "camoufox_bridge.hpp"
 
 #include "../../infra/executor.hpp"
-#include "../../ui/embedded_resources.hpp"
 #include "../../../helpers/diag_log.hpp"
 
 #include <windows.h>

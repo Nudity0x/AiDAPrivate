@@ -6,19 +6,26 @@
 #include "../scanner/pointer_scanner.hpp"
 #include "../scanner/snapshot_diff.hpp"
 #include "../scanner/aob_generator.hpp"
-#include "../scanner/scan_hub_view.hpp"
 #include "../runtime/standalone_driver.hpp"
+#include "../ui/ui_thread_dispatcher.hpp"
 #include "../../helpers/diag_log.hpp"
+#include "qt/scanner/scan_hub_controller.hpp"
+
+#include <QtCore/QCoreApplication>
+#include <QtTest/QSignalSpy>
 
 #include <Windows.h>
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <iterator>
+#include <functional>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -333,7 +340,8 @@ static bool wait_scan_idle(int max_iters = 100, HANDLE hf = INVALID_HANDLE_VALUE
         size_t result_count = 0;
         {
             std::lock_guard<std::mutex> lk(memory_scanner::g_state.results_mutex);
-            result_count = memory_scanner::g_state.results.size();
+            result_count = memory_scanner::g_state.results
+                ? memory_scanner::g_state.results->size() : 0;
         }
         float progress = memory_scanner::g_state.scan_progress.load(std::memory_order_acquire);
         bool done = memory_scanner::g_state.scan_thread_done.load(std::memory_order_acquire);
@@ -365,7 +373,9 @@ static bool wait_scan_idle(int max_iters = 100, HANDLE hf = INVALID_HANDLE_VALUE
 
 static size_t snapshot_results(std::vector<memory_scanner::scan_result_t>& out) {
     std::lock_guard<std::mutex> lk(memory_scanner::g_state.results_mutex);
-    out = memory_scanner::g_state.results;
+    out.clear();
+    if (memory_scanner::g_state.results)
+        out = *memory_scanner::g_state.results;
     return out.size();
 }
 
@@ -417,9 +427,12 @@ static bool seed_fixture_scan(const memory_scanner::scan_config_t& cfg,
     result.current_value.assign(rb.begin(), rb.begin() + static_cast<ptrdiff_t>(expected_len));
 
     std::lock_guard<std::mutex> lk(memory_scanner::g_state.results_mutex);
-    memory_scanner::g_state.results.clear();
     memory_scanner::g_state.scan_history.clear();
-    memory_scanner::g_state.results.push_back(std::move(result));
+    {
+        auto fresh = std::make_shared<std::vector<memory_scanner::scan_result_t>>();
+        fresh->push_back(std::move(result));
+        memory_scanner::g_state.results = std::move(fresh);
+    }
     memory_scanner::g_state.total_found = 1;
     memory_scanner::g_state.has_initial_scan = true;
     memory_scanner::g_state.scan_count = 1;
@@ -503,7 +516,8 @@ static void test_memscan_initialize(HANDLE hf, std::atomic<int>& passed, std::at
     size_t results = 0;
     {
         std::lock_guard<std::mutex> lk(memory_scanner::g_state.results_mutex);
-        results = memory_scanner::g_state.results.size();
+        results = memory_scanner::g_state.results
+            ? memory_scanner::g_state.results->size() : 0;
     }
 
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
@@ -930,11 +944,14 @@ static void test_reset_scan(HANDLE hf, std::atomic<int>& passed, std::atomic<int
         seed.previous_value = {0x10, 0x20, 0x30, 0x40};
         seed.module_name = "test_reset_fixture";
         seed.module_offset = 0x1000;
-        memory_scanner::g_state.results.clear();
         memory_scanner::g_state.scan_history.clear();
-        memory_scanner::g_state.results.push_back(seed);
-        memory_scanner::g_state.scan_history.push_back(memory_scanner::g_state.results);
-        memory_scanner::g_state.total_found = memory_scanner::g_state.results.size();
+        {
+            auto fresh = std::make_shared<std::vector<memory_scanner::scan_result_t>>();
+            fresh->push_back(std::move(seed));
+            memory_scanner::g_state.results = fresh;
+            memory_scanner::g_state.scan_history.push_back(std::move(fresh));
+        }
+        memory_scanner::g_state.total_found = memory_scanner::g_state.results->size();
         memory_scanner::g_state.has_initial_scan = true;
         memory_scanner::g_state.scan_count = 2;
         memory_scanner::g_state.scan_progress.store(0.25f, std::memory_order_release);
@@ -947,7 +964,8 @@ static void test_reset_scan(HANDLE hf, std::atomic<int>& passed, std::atomic<int
     int seeded_scan_count = 0;
     {
         std::lock_guard<std::mutex> lk(memory_scanner::g_state.results_mutex);
-        seeded_results = memory_scanner::g_state.results.size();
+        seeded_results = memory_scanner::g_state.results
+            ? memory_scanner::g_state.results->size() : 0;
         seeded_history = memory_scanner::g_state.scan_history.size();
         seeded_total = memory_scanner::g_state.total_found;
         seeded_initial = memory_scanner::g_state.has_initial_scan;
@@ -970,7 +988,8 @@ static void test_reset_scan(HANDLE hf, std::atomic<int>& passed, std::atomic<int
     int scan_count = -1;
     {
         std::lock_guard<std::mutex> lk(memory_scanner::g_state.results_mutex);
-        results_empty = memory_scanner::g_state.results.empty();
+        results_empty = !memory_scanner::g_state.results ||
+            memory_scanner::g_state.results->empty();
         history_empty = memory_scanner::g_state.scan_history.empty();
         total_found = memory_scanner::g_state.total_found;
         has_initial = memory_scanner::g_state.has_initial_scan;
@@ -2413,7 +2432,8 @@ static void test_scan_mode_unknown_initial(HANDLE hf, std::atomic<int>& passed, 
     size_t found = 0;
     {
         std::lock_guard<std::mutex> lk(memory_scanner::g_state.results_mutex);
-        found = memory_scanner::g_state.results.size();
+        found = memory_scanner::g_state.results
+            ? memory_scanner::g_state.results->size() : 0;
     }
 
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
@@ -3495,75 +3515,193 @@ static void test_memscan_shutdown(HANDLE hf, std::atomic<int>& passed, std::atom
     }
 }
 
-static_assert(std::size(scan_hub_view::s_tabs) == static_cast<size_t>(scan_hub_view::sub_tab_t::COUNT),
-              "scan_hub s_tabs must cover all sub_tab_t entries");
+static_assert(aida::qt::scanner::ScanHubController::kTabCount == 7,
+              "scan hub phase table drives exactly 7 controller tabs");
 
-static const char* scan_hub_sub_tab_label(scan_hub_view::sub_tab_t tab) {
-    int idx = static_cast<int>(tab);
-    const int count = static_cast<int>(scan_hub_view::sub_tab_t::COUNT);
-    if (idx < 0 || idx >= count)
-        return "<oob>";
-    return scan_hub_view::s_tabs[idx].label;
+static constexpr int k_scan_hub_dispatch_timeout_ms = 15000;
+static constexpr int k_scan_hub_signal_timeout_ms = 5000;
+static constexpr int k_scan_hub_idle_probe_ms = 300;
+
+struct scan_hub_tab_result_t {
+    int after = -1;
+    bool signal_delivered = false;
+    int signal_count = 0;
+    int signal_last_arg = -1;
+};
+
+static bool scanner_run_on_ui_thread(const char* tag, const std::function<void()>& body) {
+    if (aida::ui_thread::is_owner_thread()) {
+        if (!aida::ui_thread::require_owner("testlab", tag, "scanner_inline"))
+            return false;
+        body();
+        return true;
+    }
+    struct dispatch_state_t {
+        std::mutex mtx;
+        std::condition_variable cv;
+        bool done = false;
+    };
+    auto state = std::make_shared<dispatch_state_t>();
+    const bool posted = aida::ui_thread::post([state, body]() {
+        body();
+        {
+            std::lock_guard<std::mutex> lk(state->mtx);
+            state->done = true;
+        }
+        state->cv.notify_all();
+    }, "testlab", tag, "scanner_dispatch");
+    if (!posted)
+        return false;
+    std::unique_lock<std::mutex> lk(state->mtx);
+    return state->cv.wait_for(lk, std::chrono::milliseconds(k_scan_hub_dispatch_timeout_ms),
+        [&] { return state->done; });
 }
 
 static void select_scan_hub_tab(HANDLE hf, std::atomic<int>& passed, std::atomic<int>& failed,
-                                const char* tag, scan_hub_view::sub_tab_t value) {
+                                const char* tag, int value) {
     auto t0 = std::chrono::steady_clock::now();
-    scan_hub_view::sub_tab_t before = scan_hub_view::active_sub_tab();
-    const char* before_label = scan_hub_sub_tab_label(before);
-    const char* target_label = scan_hub_sub_tab_label(value);
+    auto& controller = aida::qt::scanner::ScanHubController::instance();
+    const int before = controller.current_tab();
+    const char* before_label = aida::qt::scanner::ScanHubController::tab_label(before);
+    const char* target_label = aida::qt::scanner::ScanHubController::tab_label(value);
     log_msg(hf, tag, "STATE -- before=%d label=%s target=%d target_label=%s tid=%lu",
-        static_cast<int>(before),
+        before,
         before_label,
-        static_cast<int>(value),
+        value,
         target_label,
         static_cast<unsigned long>(GetCurrentThreadId()));
-    scan_hub_view::set_sub_tab(value);
-    scan_hub_view::sub_tab_t got = scan_hub_view::active_sub_tab();
-    const char* got_label = scan_hub_sub_tab_label(got);
-    long long us = elapsed_us_since(t0);
-    log_msg(hf, tag, "STATE -- after=%d label=%s changed=%d elapsed_us=%lld",
-        static_cast<int>(got),
+
+    scan_hub_tab_result_t result;
+    const bool ran = scanner_run_on_ui_thread(tag, [&]() {
+        controller.note_page_shown();
+        QCoreApplication::processEvents();
+        QSignalSpy spy(&controller, &aida::qt::scanner::ScanHubController::currentTabChanged);
+        controller.set_current_tab(value);
+        const bool delivered = spy.wait(std::chrono::milliseconds(k_scan_hub_signal_timeout_ms));
+        result.after = controller.current_tab();
+        result.signal_delivered = delivered;
+        result.signal_count = static_cast<int>(spy.count());
+        if (result.signal_count > 0)
+            result.signal_last_arg = spy.last().at(0).toInt();
+    });
+
+    if (!ran) {
+        log_msg(hf, tag, "FAIL -- ui dispatch failed/timeout tid=%lu owner_tid=%lu pending=%zu",
+            static_cast<unsigned long>(GetCurrentThreadId()),
+            static_cast<unsigned long>(aida::ui_thread::owner_tid()),
+            aida::ui_thread::pending_count());
+        failed.fetch_add(1);
+        return;
+    }
+
+    const char* got_label = aida::qt::scanner::ScanHubController::tab_label(result.after);
+    const long long us = elapsed_us_since(t0);
+    log_msg(hf, tag, "STATE -- after=%d label=%s changed=%d signal_delivered=%d signal_count=%d signal_last_arg=%d elapsed_us=%lld",
+        result.after,
         got_label,
-        (before != got) ? 1 : 0,
+        (before != result.after) ? 1 : 0,
+        result.signal_delivered ? 1 : 0,
+        result.signal_count,
+        result.signal_last_arg,
         us);
-    if (got == value) {
-        log_msg(hf, tag, "PASS -- scan_hub sub_tab selected and read back (%d label=%s elapsed_us=%lld)",
-            static_cast<int>(value), got_label, us);
+    if (result.after == value && result.signal_delivered && result.signal_count >= 1 &&
+        result.signal_last_arg == value && target_label[0] != '\0') {
+        log_msg(hf, tag, "PASS -- scan hub tab %d (%s) selected, read back, and currentTabChanged observed via QSignalSpy (elapsed_us=%lld)",
+            value, target_label, us);
         passed.fetch_add(1);
     } else {
-        log_msg(hf, tag, "FAIL -- scan_hub sub_tab set %d (%s) but read back %d (%s) elapsed_us=%lld",
-            static_cast<int>(value), target_label,
-            static_cast<int>(got), got_label, us);
+        log_msg(hf, tag, "FAIL -- scan hub tab set %d (%s) readback=%d (%s) signal_delivered=%d signal_count=%d signal_last_arg=%d elapsed_us=%lld",
+            value, target_label,
+            result.after, got_label,
+            result.signal_delivered ? 1 : 0,
+            result.signal_count,
+            result.signal_last_arg,
+            us);
         failed.fetch_add(1);
     }
 }
 
 static void test_scan_hub_tab_value_scan(HANDLE hf, std::atomic<int>& passed, std::atomic<int>& failed) {
-    select_scan_hub_tab(hf, passed, failed, "scan_hub_tab.value_scan", scan_hub_view::sub_tab_t::value_scan);
+    select_scan_hub_tab(hf, passed, failed, "scan_hub_tab.value_scan", 0);
 }
 static void test_scan_hub_tab_crypto(HANDLE hf, std::atomic<int>& passed, std::atomic<int>& failed) {
-    select_scan_hub_tab(hf, passed, failed, "scan_hub_tab.crypto", scan_hub_view::sub_tab_t::crypto);
+    select_scan_hub_tab(hf, passed, failed, "scan_hub_tab.crypto", 1);
 }
 static void test_scan_hub_tab_aob(HANDLE hf, std::atomic<int>& passed, std::atomic<int>& failed) {
-    select_scan_hub_tab(hf, passed, failed, "scan_hub_tab.aob", scan_hub_view::sub_tab_t::aob);
+    select_scan_hub_tab(hf, passed, failed, "scan_hub_tab.aob", 2);
 }
 static void test_scan_hub_tab_decrypt(HANDLE hf, std::atomic<int>& passed, std::atomic<int>& failed) {
-    select_scan_hub_tab(hf, passed, failed, "scan_hub_tab.decrypt", scan_hub_view::sub_tab_t::decrypt);
+    select_scan_hub_tab(hf, passed, failed, "scan_hub_tab.decrypt", 3);
 }
 static void test_scan_hub_tab_pointers(HANDLE hf, std::atomic<int>& passed, std::atomic<int>& failed) {
-    select_scan_hub_tab(hf, passed, failed, "scan_hub_tab.pointers", scan_hub_view::sub_tab_t::pointers);
+    select_scan_hub_tab(hf, passed, failed, "scan_hub_tab.pointers", 4);
 }
 static void test_scan_hub_tab_snapshots(HANDLE hf, std::atomic<int>& passed, std::atomic<int>& failed) {
-    select_scan_hub_tab(hf, passed, failed, "scan_hub_tab.snapshots", scan_hub_view::sub_tab_t::snapshots);
+    select_scan_hub_tab(hf, passed, failed, "scan_hub_tab.snapshots", 5);
 }
 static void test_scan_hub_tab_integrity(HANDLE hf, std::atomic<int>& passed, std::atomic<int>& failed) {
-    select_scan_hub_tab(hf, passed, failed, "scan_hub_tab.integrity", scan_hub_view::sub_tab_t::integrity);
+    select_scan_hub_tab(hf, passed, failed, "scan_hub_tab.integrity", 6);
+}
+
+static void test_scan_hub_tab_out_of_range(HANDLE hf, std::atomic<int>& passed, std::atomic<int>& failed) {
+    const char* tag = "scan_hub_tab.out_of_range";
+    auto t0 = std::chrono::steady_clock::now();
+    auto& controller = aida::qt::scanner::ScanHubController::instance();
+    const int before = controller.current_tab();
+    log_msg(hf, tag, "STATE -- before=%d probes=-1,%d (controller silently ignores out-of-range sets per scan_hub_controller.cpp) tid=%lu",
+        before,
+        aida::qt::scanner::ScanHubController::kTabCount,
+        static_cast<unsigned long>(GetCurrentThreadId()));
+
+    scan_hub_tab_result_t result;
+    const bool ran = scanner_run_on_ui_thread(tag, [&]() {
+        controller.note_page_shown();
+        QCoreApplication::processEvents();
+        QSignalSpy spy(&controller, &aida::qt::scanner::ScanHubController::currentTabChanged);
+        controller.set_current_tab(-1);
+        controller.set_current_tab(aida::qt::scanner::ScanHubController::kTabCount);
+        const bool delivered = spy.wait(std::chrono::milliseconds(k_scan_hub_idle_probe_ms));
+        result.after = controller.current_tab();
+        result.signal_delivered = delivered;
+        result.signal_count = static_cast<int>(spy.count());
+    });
+
+    if (!ran) {
+        log_msg(hf, tag, "FAIL -- ui dispatch failed/timeout tid=%lu owner_tid=%lu pending=%zu",
+            static_cast<unsigned long>(GetCurrentThreadId()),
+            static_cast<unsigned long>(aida::ui_thread::owner_tid()),
+            aida::ui_thread::pending_count());
+        failed.fetch_add(1);
+        return;
+    }
+
+    const char* neg_label = aida::qt::scanner::ScanHubController::tab_label(-1);
+    const char* oob_label = aida::qt::scanner::ScanHubController::tab_label(aida::qt::scanner::ScanHubController::kTabCount);
+    const long long us = elapsed_us_since(t0);
+    log_msg(hf, tag, "STATE -- after=%d unchanged=%d signal_delivered=%d signal_count=%d neg_label_empty=%d oob_label_empty=%d elapsed_us=%lld",
+        result.after,
+        (result.after == before) ? 1 : 0,
+        result.signal_delivered ? 1 : 0,
+        result.signal_count,
+        (neg_label[0] == '\0') ? 1 : 0,
+        (oob_label[0] == '\0') ? 1 : 0,
+        us);
+    if (result.after == before && !result.signal_delivered && result.signal_count == 0 &&
+        neg_label[0] == '\0' && oob_label[0] == '\0') {
+        log_msg(hf, tag, "PASS -- out-of-range sets ignored (tab stayed %d, no currentTabChanged emission, labels empty) elapsed_us=%lld",
+            before, us);
+        passed.fetch_add(1);
+    } else {
+        log_msg(hf, tag, "FAIL -- out-of-range set mutated state or emitted signal: before=%d after=%d signal_count=%d elapsed_us=%lld",
+            before, result.after, result.signal_count, us);
+        failed.fetch_add(1);
+    }
 }
 
 static size_t scanner_result_count_for_log() {
     std::lock_guard<std::mutex> lk(memory_scanner::g_state.results_mutex);
-    return memory_scanner::g_state.results.size();
+    return memory_scanner::g_state.results
+        ? memory_scanner::g_state.results->size() : 0;
 }
 
 }
@@ -3639,6 +3777,7 @@ void phase_scanner_tests(HANDLE hf, std::atomic<int>& passed, std::atomic<int>& 
         { "scan_hub_tab_pointers",    test_scan_hub_tab_pointers    },
         { "scan_hub_tab_snapshots",   test_scan_hub_tab_snapshots   },
         { "scan_hub_tab_integrity",   test_scan_hub_tab_integrity   },
+        { "scan_hub_tab_out_of_range", test_scan_hub_tab_out_of_range },
 
         { "memscan_shutdown",         test_memscan_shutdown         },
     };

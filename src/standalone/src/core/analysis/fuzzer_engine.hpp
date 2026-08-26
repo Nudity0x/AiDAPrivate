@@ -1,11 +1,5 @@
 #pragma once
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-
-#include "fuzzer_engine_preview.hpp"
-
-#else
-
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -1655,5 +1649,3 @@ inline void import_crashes()
 }
 
 }
-
-#endif

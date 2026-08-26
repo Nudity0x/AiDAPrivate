@@ -1,7 +1,7 @@
 #pragma once
 
 #include <algorithm>
-#include "theme.hpp"
+
 #include <array>
 #include <atomic>
 #include <cmath>
@@ -30,7 +30,7 @@
 #include "../infra/executor.hpp"
 #include "../ui/task_center.hpp"
 #include "../../helpers/diag_log.hpp"
-#include "imgui/imgui.h"
+
 
 #include <nlohmann/json.hpp>
 
@@ -238,38 +238,6 @@ inline const char* field_type_name(field_type_t t)
 	case field_type_t::utf16_string:  return "utf16*";
 	case field_type_t::bool8:         return "bool";
 	default: return "unk";
-	}
-}
-
-inline ImU32 field_type_color(field_type_t t, float alpha)
-{
-	const auto& th = aida::ui::resolved();
-	switch (t) {
-	case field_type_t::int8:
-	case field_type_t::int16:
-	case field_type_t::int32:
-	case field_type_t::int64:        return aida::ui::with_alpha(th.syn_type, alpha);
-	case field_type_t::uint8:
-	case field_type_t::uint16:
-	case field_type_t::uint32:
-	case field_type_t::uint64:       return aida::ui::with_alpha(th.syn_number, alpha);
-	case field_type_t::float32:
-	case field_type_t::float64:      return aida::ui::with_alpha(th.syn_number, alpha);
-	case field_type_t::pointer:      return aida::ui::with_alpha(th.syn_string, alpha);
-	case field_type_t::vtable_ptr:   return aida::ui::with_alpha(th.error, alpha);
-	case field_type_t::c_string:
-	case field_type_t::wide_string:  return aida::ui::with_alpha(th.syn_string, alpha);
-	case field_type_t::padding:      return aida::ui::with_alpha(th.text_dim, alpha);
-	case field_type_t::vec2:
-	case field_type_t::vec3:
-	case field_type_t::vec4:         return aida::ui::with_alpha(th.warning, alpha);
-	case field_type_t::mat4x4:       return aida::ui::with_alpha(th.warning, alpha);
-	case field_type_t::color_rgba:   return aida::ui::with_alpha(th.syn_keyword, alpha);
-	case field_type_t::bitfield:     return aida::ui::with_alpha(th.syn_keyword, alpha);
-	case field_type_t::utf8_string:  return aida::ui::with_alpha(th.syn_string, alpha);
-	case field_type_t::utf16_string: return aida::ui::with_alpha(th.syn_string, alpha);
-	case field_type_t::bool8:        return aida::ui::with_alpha(th.syn_keyword, alpha);
-	default: return aida::ui::with_alpha(th.syn_identifier, alpha);
 	}
 }
 

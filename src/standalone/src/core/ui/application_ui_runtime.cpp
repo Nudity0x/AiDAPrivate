@@ -1,47 +1,33 @@
-#include "application_ui_runtime.hpp"
+﻿#include "application_ui_runtime.hpp"
 
-#include "context_menu_renderer.hpp"
-#include "application_view_registry.hpp"
-#include "design_system.hpp"
+#include "../../helpers/diag_log.hpp"
+
 #include "explorer_views.hpp"
-#include "output_views.hpp"
 #include "programming_tasks.hpp"
-#include "programming_language_views.hpp"
 #include "task_center.hpp"
-#include "toast_notification.hpp"
 #include "ui_thread_dispatcher.hpp"
-#include "workspace_layout.hpp"
 #include "../../helpers/globals.h"
 #include "../editor/code_editor.hpp"
 #include "../editor/programming_language_service.hpp"
 #include "../debugger/source_debug_service.hpp"
 #include "../debugger/debugger_engine.hpp"
 #include "../debugger/debugger_interaction_context.hpp"
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-#include "../../preview/debugger_preview_runtime.hpp"
-#else
 #include "../runtime/standalone_driver.hpp"
-#endif
 #include "../infra/executor.hpp"
 #include "../session/analysis_session.hpp"
 #include "../settings/standalone_settings.hpp"
 #include "../settings/settings_persistence_service.hpp"
 #include "../disasm/cfg_view.hpp"
-#include "../disasm/comment_dialog.hpp"
 #include "../disasm/disasm_view.hpp"
 #include "../disasm/pseudocode_view.hpp"
-#include "../disasm/rename_dialog.hpp"
 #include "../analysis/workspace/overlay_journal.hpp"
-#include "../analysis/struct_recon_view.hpp"
-#include "../analysis/types_hub_view.hpp"
-#include "../analysis/analysis_relationship_views.hpp"
+#include "qt/analysis/qt_analysis_host_hooks.hpp"
+#include "qt/programming/programming_host_hooks.hpp"
 #include "../ai/standalone_chat.hpp"
 #include "../debugger/debugger_view.hpp"
 #include "../network/network_view.hpp"
-#include "../scanner/memory_scanner_view.hpp"
+#include "qt/scanner/scan_commands.hpp"
 #include "../workbench/workbench_shell_integration.hpp"
-
-#include "imgui/imgui.h"
 
 #include <algorithm>
 #include <array>
@@ -63,6 +49,8 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+namespace output_views = aida::qt::programming::host;
 
 namespace aida::ui::application_ui {
 
@@ -166,15 +154,6 @@ struct view_surface_context_t {
     std::string window_name;
 };
 
-struct retained_entity_runtime_context_t {
-    retained_entity_context_t retained;
-    const retained_entity_context_t* external = nullptr;
-
-    const retained_entity_context_t& context() const noexcept {
-        return external ? *external : retained;
-    }
-};
-
 struct pending_action_confirmation_t {
     bool active = false;
     bool open_requested = false;
@@ -222,7 +201,11 @@ struct runtime_t {
     context_menu_open_request_t retained_entity_popup_request;
     std::uint64_t generation = 1;
     std::uint64_t invocation = 1;
-    std::vector<ImGuiKeyChord> consumed_strokes_this_frame;
+    shell_host_services_t host;
+    bool catalog_view_actions_installed = false;
+    std::vector<shortcut_binding_t> deferred_shortcut_bindings;
+    std::function<interaction_context_t()> context_source;
+    std::function<void()> command_palette_toggle_hook;
     std::map<stable_action_binding_id_t, shortcut_binding_t> default_shortcuts;
     bool initialized = false;
     bool editor_focused = false;
@@ -231,6 +214,7 @@ struct runtime_t {
 	bool previous_editor_text_input = false;
 	bool editor_focus_observed_this_frame = false;
     bool editor_review_mode = false;
+    bool text_input_focus_active = false;
     code_editor_widget::review_hunk_identity_t editor_hunk_target;
     bool editor_hunk_target_explicit = false;
     bool shortcut_capture_active = false;
@@ -251,6 +235,218 @@ stable_action_id_t action_id(const char* value) {
 
 stable_context_type_id_t context_type(const char* value) {
     return stable_context_type_id_t(value ? value : "");
+}
+
+std::optional<view_host_descriptor_t> host_find_view(const stable_view_id_t& id) {
+    const auto& host = runtime().host;
+    return host.find_view_descriptor ? host.find_view_descriptor(id) : std::nullopt;
+}
+
+bool host_is_view_open(const stable_view_id_t& id) {
+    const auto& host = runtime().host;
+    return host.is_view_open && host.is_view_open(id);
+}
+
+bool host_is_instance_open(const view_instance_id_t& id) {
+    const auto& host = runtime().host;
+    return host.is_view_instance_open && host.is_view_instance_open(id);
+}
+
+capability_state_t host_evaluate_view(const stable_view_id_t& id,
+                                      const interaction_context_t& context) {
+    const auto& host = runtime().host;
+    return host.evaluate_view ? host.evaluate_view(id, context)
+        : capability_state_t::unavailable("The view host is unavailable", false);
+}
+
+std::optional<view_instance_id_t> host_focused_instance() {
+    const auto& host = runtime().host;
+    return host.focused_view_instance ? host.focused_view_instance() : std::nullopt;
+}
+
+std::string host_window_name(const view_instance_id_t& id) {
+    const auto& host = runtime().host;
+    return host.view_window_name ? host.view_window_name(id) : std::string{};
+}
+
+bool host_is_pinned(const view_instance_id_t& id) {
+    const auto& host = runtime().host;
+    return host.is_view_pinned && host.is_view_pinned(id);
+}
+
+bool host_can_duplicate(const view_instance_id_t& id) {
+    const auto& host = runtime().host;
+    return host.can_duplicate_view && host.can_duplicate_view(id);
+}
+
+bool host_can_reset_state(const view_instance_id_t& id) {
+    const auto& host = runtime().host;
+    return host.can_reset_view_state && host.can_reset_view_state(id);
+}
+
+bool host_can_reopen_last_closed() {
+    const auto& host = runtime().host;
+    return host.can_reopen_last_closed_view && host.can_reopen_last_closed_view();
+}
+
+view_operation_result_t host_open_or_focus(const stable_view_id_t& id) {
+    const auto& host = runtime().host;
+    return host.open_or_focus_view ? host.open_or_focus_view(id)
+        : unavailable_view_operation();
+}
+
+view_operation_result_t host_close_view(const stable_view_id_t& id) {
+    const auto& host = runtime().host;
+    return host.close_view ? host.close_view(id) : unavailable_view_operation();
+}
+
+view_operation_result_t host_close_instance(const view_instance_id_t& id) {
+    const auto& host = runtime().host;
+    return host.close_view_instance ? host.close_view_instance(id)
+        : unavailable_view_operation();
+}
+
+view_operation_result_t host_close_other_instances(const view_instance_id_t& id) {
+    const auto& host = runtime().host;
+    return host.close_other_view_instances ? host.close_other_view_instances(id)
+        : unavailable_view_operation();
+}
+
+view_operation_result_t host_toggle_pin(const view_instance_id_t& id) {
+    const auto& host = runtime().host;
+    return host.toggle_view_pin ? host.toggle_view_pin(id)
+        : unavailable_view_operation();
+}
+
+view_operation_result_t host_duplicate_instance(const view_instance_id_t& id) {
+    const auto& host = runtime().host;
+    return host.duplicate_view_instance ? host.duplicate_view_instance(id)
+        : unavailable_view_operation();
+}
+
+view_operation_result_t host_request_reset_state(const view_instance_id_t& id) {
+    const auto& host = runtime().host;
+    return host.request_view_reset_state ? host.request_view_reset_state(id)
+        : unavailable_view_operation();
+}
+
+view_operation_result_t host_reopen_last_closed() {
+    const auto& host = runtime().host;
+    return host.reopen_last_closed_view ? host.reopen_last_closed_view()
+        : unavailable_view_operation();
+}
+
+view_operation_result_t host_open_default_missing() {
+    const auto& host = runtime().host;
+    return host.open_default_missing_views ? host.open_default_missing_views()
+        : unavailable_view_operation();
+}
+
+workspace_preset_t host_active_preset() {
+    const auto& host = runtime().host;
+    return host.active_workspace_preset ? host.active_workspace_preset()
+        : workspace_preset_t::analysis;
+}
+
+workspace_identity_t host_active_identity() {
+    const auto& host = runtime().host;
+    return host.active_workspace_identity ? host.active_workspace_identity()
+        : workspace_identity_t{};
+}
+
+bool host_catalog_ready() {
+    const auto& host = runtime().host;
+    return host.user_layout_catalog_ready && host.user_layout_catalog_ready();
+}
+
+bool host_layout_locked() {
+    const auto& host = runtime().host;
+    return host.layout_locked && host.layout_locked();
+}
+
+workspace_request_result_t host_set_layout_locked(bool locked) {
+    const auto& host = runtime().host;
+    return host.set_layout_locked ? host.set_layout_locked(locked)
+        : workspace_request_result_t::unavailable;
+}
+
+bool host_operation_pending() {
+    const auto& host = runtime().host;
+    return host.workspace_operation_pending && host.workspace_operation_pending();
+}
+
+std::string host_operation_status() {
+    const auto& host = runtime().host;
+    return host.workspace_operation_status ? host.workspace_operation_status()
+        : std::string{};
+}
+
+bool host_dock_space_ready() {
+    const auto& host = runtime().host;
+    return host.dock_space_ready && host.dock_space_ready();
+}
+
+surface_placement_t host_inspect_placement(const std::string& window_name) {
+    const auto& host = runtime().host;
+    return host.inspect_surface_placement
+        ? host.inspect_surface_placement(window_name) : surface_placement_t{};
+}
+
+workspace_request_result_t host_float_window(const std::string& window) {
+    const auto& host = runtime().host;
+    return host.float_window ? host.float_window(window)
+        : workspace_request_result_t::unavailable;
+}
+
+workspace_request_result_t host_dock_window(const std::string& window,
+                                            dock_region_t region) {
+    const auto& host = runtime().host;
+    return host.dock_window ? host.dock_window(window, region)
+        : workspace_request_result_t::unavailable;
+}
+
+workspace_request_result_t host_split_window(const std::string& window,
+                                             const std::string& anchor,
+                                             dock_split_direction_t direction) {
+    const auto& host = runtime().host;
+    return host.split_window ? host.split_window(window, anchor, direction)
+        : workspace_request_result_t::unavailable;
+}
+
+workspace_request_result_t host_switch_workspace(workspace_preset_t preset) {
+    const auto& host = runtime().host;
+    return host.switch_workspace ? host.switch_workspace(preset)
+        : workspace_request_result_t::unavailable;
+}
+
+workspace_request_result_t host_save_active_user_layout() {
+    const auto& host = runtime().host;
+    return host.save_active_user_layout ? host.save_active_user_layout()
+        : workspace_request_result_t::unavailable;
+}
+
+workspace_request_result_t host_restore_builtin(workspace_preset_t preset) {
+    const auto& host = runtime().host;
+    return host.restore_builtin_workspace ? host.restore_builtin_workspace(preset)
+        : workspace_request_result_t::unavailable;
+}
+
+workspace_request_result_t host_reset_current_layout() {
+    const auto& host = runtime().host;
+    return host.reset_current_layout ? host.reset_current_layout()
+        : workspace_request_result_t::unavailable;
+}
+
+workspace_request_result_t host_activate_safe_layout() {
+    const auto& host = runtime().host;
+    return host.activate_safe_layout ? host.activate_safe_layout()
+        : workspace_request_result_t::unavailable;
+}
+
+workspace_request_result_t host_open_missing_views() {
+    const auto& host = runtime().host;
+    return host.open_missing_views ? host.open_missing_views()
+        : workspace_request_result_t::unavailable;
 }
 
 capability_state_t editor_active() {
@@ -315,8 +511,7 @@ std::string focused_provider_action(focused_edit_operation_t operation,
 		if (operation == focused_edit_operation_t::find) return "terminal.search";
 		return {};
 	}
-	const auto* descriptor = application_views::registry().find_descriptor(
-		context.active_view);
+	const auto descriptor = host_find_view(context.active_view);
 	if (descriptor && descriptor->category == view_category_t::output) {
 		if (operation == focused_edit_operation_t::copy) return "output.copy_all";
 		if (operation == focused_edit_operation_t::select_all) return "output.select_all";
@@ -337,8 +532,7 @@ capability_state_t focused_edit_capability(focused_edit_operation_t operation,
 	const bool exact_editor_canvas_focus = effective_editor_focus() &&
 		!effective_editor_text_input() &&
 		context.active_view == stable_view_id_t("document.code");
-	if ((effective_editor_text_input() ||
-		(ImGui::GetCurrentContext() && ImGui::GetIO().WantTextInput)) &&
+	if ((effective_editor_text_input() || runtime().text_input_focus_active) &&
 		!exact_editor_canvas_focus)
 		return capability_state_t::unavailable(
 			"The focused text input owns this edit command");
@@ -372,8 +566,7 @@ action_handler_result_t execute_focused_edit(focused_edit_operation_t operation,
 	const bool exact_editor_canvas_focus = effective_editor_focus() &&
 		!effective_editor_text_input() &&
 		invocation.context.active_view == stable_view_id_t("document.code");
-	if ((effective_editor_text_input() ||
-		(ImGui::GetCurrentContext() && ImGui::GetIO().WantTextInput)) &&
+	if ((effective_editor_text_input() || runtime().text_input_focus_active) &&
 		!exact_editor_canvas_focus)
 		return action_handler_result_t::failed(
 			"The focused text input owns this edit command");
@@ -451,7 +644,7 @@ action_handler_result_t request_language_query(
     if (!requested.accepted)
         return action_handler_result_t::failed(requested.reason);
     if (result_view && result_view[0]) {
-        const auto opened = application_views::open_or_focus(stable_view_id_t(result_view));
+        const auto opened = host_open_or_focus(stable_view_id_t(result_view));
         if (!opened.ok())
             return action_handler_result_t::failed(opened.detail);
     }
@@ -694,9 +887,9 @@ std::string compose_view_action_id(const stable_view_id_t& view) {
     return std::string("view.manage.") + view.value();
 }
 
-action_handler_result_t workspace_result(workspace_layout::workspace_request_result_t result,
+action_handler_result_t workspace_result(workspace_request_result_t result,
                                          const char* failure) {
-    using result_t = workspace_layout::workspace_request_result_t;
+    using result_t = workspace_request_result_t;
     if (result == result_t::completed || result == result_t::queued ||
         result == result_t::unchanged)
         return action_handler_result_t::completed();
@@ -721,8 +914,12 @@ capability_state_t live_surface_capability(const interaction_context_t& context)
     const auto* surface = view_surface(context);
     if (!surface)
         return capability_state_t::unavailable("Open this action from a dock tab or panel title");
-    const auto* descriptor = application_views::registry().find_descriptor(surface->instance.view);
-    if (!descriptor || !application_views::registry().is_open(surface->instance))
+    const auto& host = runtime().host;
+    const auto descriptor = host.find_view_descriptor
+        ? host.find_view_descriptor(surface->instance.view) : std::nullopt;
+    const bool open = host.is_view_instance_open &&
+        host.is_view_instance_open(surface->instance);
+    if (!descriptor || !open)
         return capability_state_t::unavailable("The target view is no longer open");
     return capability_state_t::available();
 }
@@ -732,10 +929,11 @@ capability_state_t surface_close_capability(const interaction_context_t& context
     if (!live.enabled)
         return live;
     const auto* surface = view_surface(context);
-    const auto* descriptor = application_views::registry().find_descriptor(surface->instance.view);
+    const auto& host = runtime().host;
+    const auto descriptor = host.find_view_descriptor(surface->instance.view);
     if (!descriptor->closeable)
         return capability_state_t::unavailable("This required shell surface cannot be closed");
-    if (application_views::is_pinned(surface->instance))
+    if (host.is_view_pinned && host.is_view_pinned(surface->instance))
         return capability_state_t::unavailable("Unpin this view before closing it");
     return capability_state_t::available();
 }
@@ -745,40 +943,46 @@ capability_state_t surface_close_others_capability(const interaction_context_t& 
     if (!live.enabled)
         return live;
     const auto* surface = view_surface(context);
+    const auto& host = runtime().host;
     bool available = false;
-    application_views::registry().for_each_instance([&](const view_descriptor_t& descriptor,
-            const view_instance_state_t& instance) {
-        if (!(instance.id == surface->instance) && instance.open && descriptor.closeable &&
-            !application_views::is_pinned(instance.id))
-            available = true;
-    }, true);
+    if (host.for_each_open_view_instance) {
+        host.for_each_open_view_instance([&](const view_host_instance_t& instance) {
+            if (!(instance.id == surface->instance) && instance.open && instance.closeable &&
+                !instance.pinned)
+                available = true;
+        });
+    }
     return available ? capability_state_t::available() :
         capability_state_t::unavailable("No other closeable unpinned view is open");
 }
 
 capability_state_t surface_placement_capability(const interaction_context_t& context,
-    std::optional<workspace_layout::dock_role_t> target) {
+    std::optional<dock_region_t> target) {
     const auto live = live_surface_capability(context);
     if (!live.enabled)
         return live;
-    if (workspace_layout::operation_pending()) {
-        const std::string status = workspace_layout::operation_status();
+    const auto& host = runtime().host;
+    if (host.workspace_operation_pending && host.workspace_operation_pending()) {
+        const std::string status = host.workspace_operation_status
+            ? host.workspace_operation_status() : std::string{};
         return capability_state_t::unavailable(status.empty()
             ? "A workspace layout transaction is already in progress" : status);
     }
-    if (workspace_layout::layout_locked())
+    if (host.layout_locked && host.layout_locked())
         return capability_state_t::unavailable("Unlock the workspace layout before moving views");
     const auto* surface = view_surface(context);
-    const auto placement = workspace_layout::inspect_window_placement(surface->window_name);
+    const auto placement = host.inspect_surface_placement
+        ? host.inspect_surface_placement(surface->window_name) : surface_placement_t{};
     if (!placement.realized)
         return capability_state_t::unavailable("The target window has not been realized yet");
     if (!target)
         return placement.docked ? capability_state_t::available() :
             capability_state_t::unavailable("This view is already floating");
-    const ImGuiID target_node = workspace_layout::node_id(*target);
-    if (target_node == 0)
+    const bool target_available = host.dock_region_available &&
+        host.dock_region_available(*target);
+    if (!target_available)
         return capability_state_t::unavailable("The requested dock region is unavailable in this layout");
-    if (placement.dock_node == target_node)
+    if (placement.region && *placement.region == *target)
         return capability_state_t::unavailable("This view is already in that dock region");
     return capability_state_t::available();
 }
@@ -788,33 +992,30 @@ action_handler_result_t surface_operation(const view_operation_result_t& result)
         action_handler_result_t::failed(result.detail);
 }
 
-bool valid_edit_stroke(ImGuiKeyChord stroke) noexcept {
-    const ImGuiKey key = static_cast<ImGuiKey>(stroke & ~ImGuiMod_Mask_);
-    return key >= ImGuiKey_Tab && key < ImGuiKey_GamepadStart &&
-           key != ImGuiKey_LeftCtrl && key != ImGuiKey_RightCtrl &&
-           key != ImGuiKey_LeftShift && key != ImGuiKey_RightShift &&
-           key != ImGuiKey_LeftAlt && key != ImGuiKey_RightAlt &&
-           key != ImGuiKey_LeftSuper && key != ImGuiKey_RightSuper;
+void copy_text_to_clipboard(const std::string& text) {
+    const auto& host = runtime().host;
+    if (host.set_clipboard_text)
+        host.set_clipboard_text(text.c_str());
 }
 
-std::string format_strokes(const std::vector<ImGuiKeyChord>& strokes) {
+std::string format_strokes(const std::vector<chord_stroke_t>& strokes) {
     if (strokes.empty() || strokes.size() > 4)
         return {};
     std::string result;
     for (std::size_t index = 0; index < strokes.size(); ++index) {
-        const ImGuiKeyChord stroke = strokes[index];
-        if (!valid_edit_stroke(stroke))
+        const chord_stroke_t stroke = strokes[index];
+        if (!valid_chord_stroke(stroke))
             return {};
-        const ImGuiKey key = static_cast<ImGuiKey>(stroke & ~ImGuiMod_Mask_);
-        const char* key_name = ImGui::GetKeyName(key);
+        const chord_stroke_t key = stroke & ~chord::mod_mask;
+        const char* key_name = chord_key_name(key);
         if (!key_name || !*key_name)
             return {};
         if (index != 0)
             result.append(", ");
-        if ((stroke & ImGuiMod_Ctrl) != 0) result.append("Ctrl+");
-        if ((stroke & ImGuiMod_Shift) != 0) result.append("Shift+");
-        if ((stroke & ImGuiMod_Alt) != 0) result.append("Alt+");
-        if ((stroke & ImGuiMod_Super) != 0) result.append("Super+");
+        if ((stroke & chord::mod_ctrl) != 0) result.append("Ctrl+");
+        if ((stroke & chord::mod_shift) != 0) result.append("Shift+");
+        if ((stroke & chord::mod_alt) != 0) result.append("Alt+");
+        if ((stroke & chord::mod_super) != 0) result.append("Super+");
         result.append(key_name);
     }
     return result;
@@ -856,7 +1057,7 @@ void apply_persisted_shortcut_overrides(runtime_t& rt) {
                 value["scope_kind"].get<unsigned>() !=
                     static_cast<unsigned>(found->second.scope_kind))
                 continue;
-            std::vector<ImGuiKeyChord> strokes;
+            std::vector<chord_stroke_t> strokes;
             strokes.reserve(value["strokes"].size());
             bool valid = true;
             for (const auto& encoded : value["strokes"]) {
@@ -866,8 +1067,8 @@ void apply_persisted_shortcut_overrides(runtime_t& rt) {
                     valid = false;
                     break;
                 }
-                const auto stroke = static_cast<ImGuiKeyChord>(encoded.get<unsigned>());
-                if (!valid_edit_stroke(stroke)) {
+                const auto stroke = static_cast<chord_stroke_t>(encoded.get<unsigned>());
+                if (!valid_chord_stroke(stroke)) {
                     valid = false;
                     break;
                 }
@@ -895,7 +1096,7 @@ std::optional<std::string> serialize_shortcut_overrides(const runtime_t& rt) {
              binding.sequence.strokes == found->second.sequence.strokes))
             return;
         nlohmann::json strokes = nlohmann::json::array();
-        for (const ImGuiKeyChord stroke : binding.sequence.strokes)
+        for (const chord_stroke_t stroke : binding.sequence.strokes)
             strokes.push_back(static_cast<unsigned>(stroke));
         bindings[binding.id.value()] = {
             {"action", binding.action.value()},
@@ -933,16 +1134,21 @@ bool persist_shortcut_overrides(runtime_t& rt, const shortcut_resolver_t& rollba
 void register_binding(runtime_t& rt, shortcut_binding_t binding) {
     const std::string id = binding.id.value();
     const auto registered = rt.shortcuts.register_binding(
-        std::move(binding), rt.actions);
-    if (!registered.ok())
-        throw std::logic_error(std::string("Shortcut registration failed for '") +
-            id + "': " + registered.detail);
+        binding, rt.actions);
+    if (!registered.ok()) {
+        diag::log_tagged_critical_fmt("shortcuts",
+            "shortcut_binding_skipped id=%s reason=%s", id.c_str(), registered.detail.c_str());
+        if (registered.error == shortcut_registration_error_t::invalid_action &&
+            !rt.catalog_view_actions_installed)
+            rt.deferred_shortcut_bindings.push_back(std::move(binding));
+        return;
+    }
 }
 
 void register_shortcut(runtime_t& rt,
                        const char* binding_id,
                        const char* action,
-                       ImGuiKeyChord chord,
+                       chord_stroke_t chord,
                        const char* display,
                        bool repeat = false) {
     shortcut_binding_t binding;
@@ -959,7 +1165,7 @@ void register_shortcut(runtime_t& rt,
 void register_review_shortcut(runtime_t& rt,
                               const char* binding_id,
                               const char* action,
-                              ImGuiKeyChord chord,
+                              chord_stroke_t chord,
                               const char* display) {
     shortcut_binding_t binding;
     binding.id = stable_action_binding_id_t(binding_id);
@@ -974,7 +1180,7 @@ void register_review_shortcut(runtime_t& rt,
 void register_global_shortcut(runtime_t& rt,
                               const char* binding_id,
                               const char* action,
-                              ImGuiKeyChord chord,
+                              chord_stroke_t chord,
                               const char* display) {
     shortcut_binding_t binding;
     binding.id = stable_action_binding_id_t(binding_id);
@@ -988,8 +1194,8 @@ void register_global_shortcut(runtime_t& rt,
 void register_global_chord(runtime_t& rt,
                            const char* binding_id,
                            const char* action,
-                           ImGuiKeyChord first,
-                           ImGuiKeyChord second,
+                           chord_stroke_t first,
+                           chord_stroke_t second,
                            const char* display) {
     shortcut_binding_t binding;
     binding.id = stable_action_binding_id_t(binding_id);
@@ -1003,7 +1209,7 @@ void register_global_chord(runtime_t& rt,
 void register_domain_shortcut(runtime_t& rt,
                               const char* binding_id,
                               const char* action,
-                              ImGuiKeyChord chord,
+                              chord_stroke_t chord,
                               const char* display,
                               const char* scope,
                               int priority = 0) {
@@ -1021,7 +1227,7 @@ void register_domain_shortcut(runtime_t& rt,
 void register_document_shortcut(runtime_t& rt,
                                 const char* binding_id,
                                 const char* action,
-                                ImGuiKeyChord chord,
+                                chord_stroke_t chord,
                                 const char* display,
                                 const char* scope,
                                 int priority = 0) {
@@ -1039,7 +1245,7 @@ void register_document_shortcut(runtime_t& rt,
 void register_widget_shortcut(runtime_t& rt,
                               const char* binding_id,
                               const char* action,
-                              ImGuiKeyChord chord,
+                              chord_stroke_t chord,
                               const char* display,
                               const char* scope,
                               int priority = 0) {
@@ -1248,7 +1454,7 @@ action_handler_result_t send_programming_path_to_ai(const std::string& path,
     const std::string& label, const char* source) {
     if (path.empty())
         return action_handler_result_t::failed("The selected programming item has no file path");
-    const auto opened = application_views::open_or_focus(stable_view_id_t("view.ai_chat"));
+    const auto opened = host_open_or_focus(stable_view_id_t("view.ai_chat"));
     if (!opened.ok())
         return action_handler_result_t::failed(opened.detail);
     std::string payload = "Programming context from ";
@@ -1258,7 +1464,7 @@ action_handler_result_t send_programming_path_to_ai(const std::string& path,
     if (const auto relative = workspace_relative_path(path))
         payload.append("\nWorkspace-relative path: ")
             .append(bounded_context_value(*relative));
-    chat_inject::post(payload);
+    aida::automation_ui::post_chat_inject(payload);
     return action_handler_result_t::completed();
 }
 
@@ -1267,7 +1473,7 @@ action_handler_result_t send_editor_selection_to_ai(const char* instruction) {
     const std::string selection = code_editor_widget::selected_text(16U * 1024U);
     if (!editor.active || selection.empty())
         return action_handler_result_t::failed("Select source text first");
-    const auto opened = application_views::open_or_focus(stable_view_id_t("view.ai_chat"));
+    const auto opened = host_open_or_focus(stable_view_id_t("view.ai_chat"));
     if (!opened.ok())
         return action_handler_result_t::failed(opened.detail);
     std::string payload = instruction && *instruction ? instruction : "Review this source selection";
@@ -1276,7 +1482,7 @@ action_handler_result_t send_editor_selection_to_ai(const char* instruction) {
     payload.append("\nCaret: ").append(std::to_string(editor.caret_line + 1))
         .append(":").append(std::to_string(editor.caret_column + 1));
     payload.append("\n\n```\n").append(selection).append("\n```");
-    chat_inject::post(payload);
+    aida::automation_ui::post_chat_inject(payload);
     return action_handler_result_t::completed();
 }
 
@@ -1465,7 +1671,7 @@ action_handler_result_t schedule_debugger_expression_evaluation(
                     diagnostic.details = evaluation.error;
                     diagnostic.severity = task_center::diagnostic_severity_t::error;
                     diagnostic.callbacks.focus = [] {
-                        static_cast<void>(application_views::open_or_focus(
+                        static_cast<void>(host_open_or_focus(
                             stable_view_id_t("view.programming.source_debug_console")));
                     };
                     static_cast<void>(task_center::raise_diagnostic(
@@ -1498,7 +1704,7 @@ action_handler_result_t schedule_debugger_expression_evaluation(
             diagnostic.details = dispatch_error;
             diagnostic.severity = task_center::diagnostic_severity_t::error;
             diagnostic.callbacks.focus = [] {
-                static_cast<void>(application_views::open_or_focus(
+                static_cast<void>(host_open_or_focus(
                     stable_view_id_t("view.programming.source_debug_console")));
             };
             static_cast<void>(task_center::raise_diagnostic(std::move(diagnostic)));
@@ -1544,7 +1750,7 @@ action_handler_result_t schedule_debugger_expression_evaluation(
             return aida::infra::executor::cancel(task);
         };
         registration.callbacks.focus = [persistent = persistent_watch_index >= 0] {
-            static_cast<void>(application_views::open_or_focus(stable_view_id_t(
+            static_cast<void>(host_open_or_focus(stable_view_id_t(
                 persistent ? "view.debug.watches"
                            : "view.programming.source_debug_console")));
         };
@@ -1769,7 +1975,7 @@ action_handler_result_t schedule_debugger_watch_refresh() {
                         diagnostic.details = detail;
                         diagnostic.severity = task_center::diagnostic_severity_t::error;
                         diagnostic.callbacks.focus = [] {
-                            static_cast<void>(application_views::open_or_focus(
+                            static_cast<void>(host_open_or_focus(
                                 stable_view_id_t("view.debug.watches")));
                         };
                         static_cast<void>(task_center::raise_diagnostic(
@@ -1806,7 +2012,7 @@ action_handler_result_t schedule_debugger_watch_refresh() {
                         diagnostic.details = publication_exception;
                         diagnostic.severity = task_center::diagnostic_severity_t::error;
                         diagnostic.callbacks.focus = [] {
-                            static_cast<void>(application_views::open_or_focus(
+                            static_cast<void>(host_open_or_focus(
                                 stable_view_id_t("view.debug.watches")));
                         };
                         static_cast<void>(task_center::raise_diagnostic(
@@ -1845,7 +2051,7 @@ action_handler_result_t schedule_debugger_watch_refresh() {
                     diagnostic.details = detail;
                     diagnostic.severity = task_center::diagnostic_severity_t::error;
                     diagnostic.callbacks.focus = [] {
-                        static_cast<void>(application_views::open_or_focus(
+                        static_cast<void>(host_open_or_focus(
                             stable_view_id_t("view.debug.watches")));
                     };
                     static_cast<void>(task_center::raise_diagnostic(
@@ -1872,7 +2078,7 @@ action_handler_result_t schedule_debugger_watch_refresh() {
             diagnostic.details = dispatch_error;
             diagnostic.severity = task_center::diagnostic_severity_t::error;
             diagnostic.callbacks.focus = [] {
-                static_cast<void>(application_views::open_or_focus(
+                static_cast<void>(host_open_or_focus(
                     stable_view_id_t("view.debug.watches")));
             };
             static_cast<void>(task_center::raise_diagnostic(std::move(diagnostic)));
@@ -1919,7 +2125,7 @@ action_handler_result_t schedule_debugger_watch_refresh() {
             return aida::infra::executor::cancel(task);
         };
         registration.callbacks.focus = [] {
-            static_cast<void>(application_views::open_or_focus(
+            static_cast<void>(host_open_or_focus(
                 stable_view_id_t("view.debug.watches")));
         };
         registered = task_center::try_register_executor_job(
@@ -1965,7 +2171,7 @@ bool open_workspace_search_result(const workspace_search_context_t& result) {
     if (!file_tabs::request_document_open(result.path, name,
             (std::max)(0, result.line - 1), (std::max)(0, result.column)))
         return false;
-    application_views::open_or_focus(stable_view_id_t("document.code"));
+    host_open_or_focus(stable_view_id_t("document.code"));
     return true;
 }
 
@@ -2150,7 +2356,7 @@ capability_state_t analysis_debug_mutation_capability(bool toggle_breakpoint) {
 }
 
 action_handler_result_t open_analysis_view(const char* id) {
-    const auto result = application_views::open_or_focus(stable_view_id_t(id));
+    const auto result = host_open_or_focus(stable_view_id_t(id));
     return result.ok() ? action_handler_result_t::completed()
                        : action_handler_result_t::failed(result.detail);
 }
@@ -2163,7 +2369,7 @@ capability_state_t document_or_session_cycle_capability() {
 }
 
 action_handler_result_t cycle_document_or_session(bool reverse) {
-    const auto focused = application_views::registry().focused_instance();
+    const auto focused = host_focused_instance();
     const bool code_focused = focused && focused->view == stable_view_id_t("document.code");
     if (code_focused && file_tabs::tabs.size() > 1) {
         const int count = static_cast<int>(file_tabs::tabs.size());
@@ -2171,7 +2377,7 @@ action_handler_result_t cycle_document_or_session(bool reverse) {
             ? file_tabs::active_tab : 0;
         const int target = reverse ? (current + count - 1) % count : (current + 1) % count;
         file_tabs::switch_to(target);
-        const auto result = application_views::open_or_focus(stable_view_id_t("document.code"));
+        const auto result = host_open_or_focus(stable_view_id_t("document.code"));
         return result.ok() ? action_handler_result_t::completed()
                            : action_handler_result_t::failed(result.detail);
     }
@@ -2192,12 +2398,110 @@ action_handler_result_t cycle_document_or_session(bool reverse) {
         file_tabs::switch_to(reverse
             ? (current + count_tabs - 1) % count_tabs
             : (current + 1) % count_tabs);
-        const auto result = application_views::open_or_focus(stable_view_id_t("document.code"));
+        const auto result = host_open_or_focus(stable_view_id_t("document.code"));
         return result.ok() ? action_handler_result_t::completed()
                            : action_handler_result_t::failed(result.detail);
     }
-    return action_handler_result_t::failed(
+        return action_handler_result_t::failed(
         "There is no other code document or analysis session");
+}
+
+void install_catalog_view_actions(runtime_t& rt) {
+    if (rt.catalog_view_actions_installed)
+        return;
+    if (!rt.host.for_each_view_descriptor)
+        return;
+    rt.catalog_view_actions_installed = true;
+    const auto canonical_view_capability = [](const stable_view_id_t& target,
+                                              const interaction_context_t& context) {
+        const auto descriptor = host_find_view(target);
+        if (!descriptor)
+            return capability_state_t::unavailable("The view is no longer registered");
+        if (host_is_view_open(target) && !descriptor->closeable)
+            return capability_state_t::unavailable("This required view cannot be closed");
+        return host_evaluate_view(target, context);
+    };
+    const auto canonical_view_check = [](const stable_view_id_t& target) {
+        return host_is_view_open(target)
+            ? action_check_state_t::checked : action_check_state_t::unchecked;
+    };
+    const auto toggle_canonical_view = [&rt](const stable_view_id_t& target,
+                                             const char* compatibility_action) {
+        const auto result = host_is_view_open(target)
+            ? host_close_view(target)
+            : host_open_or_focus(target);
+        if (!result.ok())
+            return action_handler_result_t::failed(result.detail);
+        if (rt.shell.persist_workspace)
+            rt.shell.persist_workspace();
+        if (compatibility_action && rt.shell.action_executed)
+            rt.shell.action_executed(compatibility_action);
+        return action_handler_result_t::completed();
+    };
+    rt.host.for_each_view_descriptor([&](const view_host_descriptor_t& view) {
+        const std::string stable_id = compose_view_action_id(view.id);
+        const std::string label = std::string("Toggle ") + view.display_name;
+        const std::string category = std::string("View / ") + view_category_label(view.category);
+        register_action(rt, stable_id.c_str(), label.c_str(), "Open, focus, or close this dockable IDE view",
+            action_surface_t::application_menu | action_surface_t::command_palette |
+                action_surface_t::accessibility,
+            [id = view.id, toggle_canonical_view](const action_invocation_t&) {
+                return toggle_canonical_view(id, nullptr);
+            },
+            [id = view.id, canonical_view_capability](const interaction_context_t& context) {
+                return canonical_view_capability(id, context);
+            }, false,
+            [id = view.id, canonical_view_check](const interaction_context_t&) {
+                return canonical_view_check(id);
+            }, view_category_id(view.category), category.c_str());
+
+        std::string focus_id = "view.focus.";
+        focus_id.append(view.id.value());
+        const std::string focus_label = std::string("Focus ") + view.display_name;
+        action_surface_t focus_surfaces = action_surface_t::application_menu |
+            action_surface_t::command_palette | action_surface_t::accessibility;
+        if (view.id.value() == "view.recent" ||
+            view.id.value() == "view.background_tasks" ||
+            view.id.value() == "view.diagnostics" ||
+            view.id.value() == "view.output")
+            focus_surfaces = focus_surfaces | action_surface_t::toolbar;
+        if (view.id.value() == "view.programming.source_debug_console" ||
+            view.id.value() == "view.analysis.references" ||
+            view.id.value() == "view.analysis.deobfuscation")
+            focus_surfaces = focus_surfaces | action_surface_t::shortcut;
+        register_action(rt, focus_id.c_str(), focus_label.c_str(),
+            "Open this IDE view if needed, then move keyboard focus to it",
+            focus_surfaces,
+            [id = view.id](const action_invocation_t&) {
+                const auto result = host_open_or_focus(id);
+                return result.ok()
+                    ? action_handler_result_t::completed()
+                    : action_handler_result_t::failed(result.detail);
+            },
+            [id = view.id](const interaction_context_t& context) {
+                return host_evaluate_view(id, context);
+            }, false, {}, view_category_id(view.category), category.c_str());
+    });
+}
+
+void retry_deferred_shortcut_bindings(runtime_t& rt) {
+    if (rt.deferred_shortcut_bindings.empty())
+        return;
+    std::vector<shortcut_binding_t> deferred;
+    deferred.swap(rt.deferred_shortcut_bindings);
+    for (auto& binding : deferred) {
+        const std::string id = binding.id.value();
+        const auto registered = rt.shortcuts.register_binding(binding, rt.actions);
+        if (!registered.ok()) {
+            diag::log_tagged_critical_fmt("shortcuts",
+                "shortcut_binding_skipped id=%s reason=%s", id.c_str(),
+                registered.detail.c_str());
+            continue;
+        }
+        rt.default_shortcuts.emplace(binding.id, binding);
+        diag::log_tagged_critical_fmt("shortcuts",
+            "shortcut_binding_registered_after_host_install id=%s", id.c_str());
+    }
 }
 
 void initialize(runtime_t& rt) {
@@ -2217,7 +2521,7 @@ void initialize(runtime_t& rt) {
         menu_surfaces | action_surface_t::toolbar,
         [](const action_invocation_t&) {
             file_tabs::open_or_focus("", "untitled", "");
-            application_views::open_or_focus(stable_view_id_t("document.code"));
+            host_open_or_focus(stable_view_id_t("document.code"));
             return action_handler_result_t::completed();
         });
     register_action(rt, "file.open", "Open File...", "Open a file",
@@ -2264,7 +2568,7 @@ void initialize(runtime_t& rt) {
             if (!file_tabs::reopen_closed_document())
                 return action_handler_result_t::failed(
                     "No path-backed closed code document is available");
-            const auto opened = application_views::open_or_focus(
+            const auto opened = host_open_or_focus(
                 stable_view_id_t("document.code"));
             return opened.ok() ? action_handler_result_t::completed()
                 : action_handler_result_t::failed(opened.detail);
@@ -2405,7 +2709,7 @@ void initialize(runtime_t& rt) {
         "Open the canonical diagnostics surface for editor, task, analysis, and runtime failures",
         all_surfaces | action_surface_t::toolbar,
         [](const action_invocation_t&) {
-            const auto result = application_views::open_or_focus(
+            const auto result = host_open_or_focus(
                 stable_view_id_t("view.diagnostics"));
             return result.ok() ? action_handler_result_t::completed()
                                : action_handler_result_t::failed(result.detail);
@@ -2541,11 +2845,11 @@ void initialize(runtime_t& rt) {
         "Request revision-bound semantic rename edits from the selected provider for explicit review",
         language_surfaces,
         [](const action_invocation_t&) {
-            const auto opened = application_views::open_or_focus(
+            const auto opened = host_open_or_focus(
                 stable_view_id_t("view.programming.references"));
             if (!opened.ok())
                 return action_handler_result_t::failed(opened.detail);
-            programming_language_views::open_rename_dialog();
+            aida::qt::programming::host::open_rename_dialog();
             return action_handler_result_t::completed();
         }, [](const interaction_context_t&) {
             return language_capability(
@@ -2670,7 +2974,7 @@ void initialize(runtime_t& rt) {
         language_surfaces,
         [](const action_invocation_t&) {
             const std::string expression = code_editor_widget::selected_text(97);
-            const auto opened = application_views::open_or_focus(
+            const auto opened = host_open_or_focus(
                 stable_view_id_t("view.debug.watches"));
             if (!opened.ok())
                 return action_handler_result_t::failed(opened.detail);
@@ -2692,7 +2996,7 @@ void initialize(runtime_t& rt) {
         language_surfaces,
         [](const action_invocation_t&) {
             const std::string expression = code_editor_widget::selected_text(97);
-            const auto opened = application_views::open_or_focus(
+            const auto opened = host_open_or_focus(
                 stable_view_id_t("view.programming.source_debug_console"));
             if (!opened.ok())
                 return action_handler_result_t::failed(opened.detail);
@@ -2858,7 +3162,7 @@ void initialize(runtime_t& rt) {
 		"Open the dockable source breakpoint, exact source excerpt and live assembly surface",
 		menu_surfaces | action_surface_t::toolbar | action_surface_t::context_menu,
 		[](const action_invocation_t&) {
-			const auto opened = application_views::open_or_focus(
+			const auto opened = host_open_or_focus(
 				stable_view_id_t("view.debug.source"));
 			return opened.ok() ? action_handler_result_t::completed()
 				: action_handler_result_t::failed(opened.detail);
@@ -2913,7 +3217,7 @@ void initialize(runtime_t& rt) {
             const auto& location = rt.programming_result.location;
             const std::string text = location.file_path + ":" +
                 std::to_string(location.line) + ":" + std::to_string(location.column);
-            ImGui::SetClipboardText(text.c_str());
+            copy_text_to_clipboard(text.c_str());
             return action_handler_result_t::completed();
         }, [&rt](const interaction_context_t&) {
             const auto current = programming_result_capability(rt.programming_result);
@@ -2930,7 +3234,7 @@ void initialize(runtime_t& rt) {
             const auto current = programming_result_capability(rt.programming_result);
             if (!current.enabled)
                 return action_handler_result_t::failed(current.disabled_reason);
-            ImGui::SetClipboardText(rt.programming_result.location.file_path.c_str());
+            copy_text_to_clipboard(rt.programming_result.location.file_path.c_str());
             return action_handler_result_t::completed();
         }, [&rt](const interaction_context_t&) {
             const auto current = programming_result_capability(rt.programming_result);
@@ -2947,7 +3251,7 @@ void initialize(runtime_t& rt) {
             const auto current = programming_result_capability(rt.programming_result);
             if (!current.enabled)
                 return action_handler_result_t::failed(current.disabled_reason);
-            ImGui::SetClipboardText(rt.programming_result.location.preview.c_str());
+            copy_text_to_clipboard(rt.programming_result.location.preview.c_str());
             return action_handler_result_t::completed();
         }, [&rt](const interaction_context_t&) {
             const auto current = programming_result_capability(rt.programming_result);
@@ -3057,12 +3361,22 @@ void initialize(runtime_t& rt) {
         "Make the selected Proximity node the new graph root",
         all_surfaces,
         [](const action_invocation_t&) {
-            return analysis_relationship_views::proximity::drill_selected()
+            auto& hooks = aida::qt::analysis::analysis_host_hooks();
+            return hooks.proximity_drill_selected && hooks.proximity_drill_selected()
                 ? action_handler_result_t::completed()
                 : action_handler_result_t::failed(
                     "The selected Proximity node could not become the graph root");
         }, [](const interaction_context_t&) {
-            return analysis_relationship_views::proximity::selected_drill_capability();
+            auto& hooks = aida::qt::analysis::analysis_host_hooks();
+            std::string reason;
+            const bool capable = hooks.proximity_drill_capability &&
+                hooks.proximity_drill_capability(reason);
+            return capable
+                ? capability_state_t::available()
+                : capability_state_t::unavailable(
+                    reason.empty()
+                        ? "Select a Proximity Browser node first"
+                        : reason);
         }, false, {}, "category.analysis.navigate", "Analysis / Navigate");
     register_action(rt, "analysis.navigate.disassembly", "Open Selection in Disassembly",
         "Open and focus the selected analysis address in Disassembly",
@@ -3172,7 +3486,7 @@ void initialize(runtime_t& rt) {
             const auto address = selected_analysis_address(context);
             if (!address)
                 return action_handler_result_t::failed("The analysis selection no longer has an address");
-            rename_dialog::open(context, *address);
+            static_cast<void>(disasm_view::request_rename_dialog(context, *address));
             return open_analysis_view("document.disassembly");
         }), retained_or_capability("analysis.modify.rename",
             [](const interaction_context_t&) { return analysis_selection_capability(); }),
@@ -3200,7 +3514,7 @@ void initialize(runtime_t& rt) {
             const auto address = selected_analysis_address(context);
             if (!address)
                 return action_handler_result_t::failed("The analysis selection no longer has an address");
-            comment_dialog::open(context, *address);
+            static_cast<void>(disasm_view::request_comment_dialog(context, *address));
             return open_analysis_view("document.disassembly");
         }), retained_or_capability("analysis.modify.comment",
             [](const interaction_context_t&) { return analysis_selection_capability(); }),
@@ -3269,8 +3583,15 @@ void initialize(runtime_t& rt) {
                 return action_handler_result_t::failed(
                     "The analysis selection no longer has an address");
             std::string error;
-            if (!types_hub_view::stage_type_application(context, *address, &error))
-                return action_handler_result_t::failed(error);
+            auto& hooks = aida::qt::analysis::analysis_host_hooks();
+            const auto runtime = disasm_view::runtime_address(context, *address)
+                .value_or(address->value);
+            if (!hooks.stage_type_application ||
+                !hooks.stage_type_application(context.workspace, runtime, error))
+                return action_handler_result_t::failed(
+                    error.empty()
+                        ? "The analysis UI is not available"
+                        : error);
             return open_analysis_view("view.types.structures");
         }), retained_or_capability("analysis.modify.retype",
             [](const interaction_context_t&) { return analysis_selection_capability(); }),
@@ -3345,11 +3666,19 @@ void initialize(runtime_t& rt) {
         "Generate and copy the current Structure Reconstruction declaration",
         menu_surfaces,
         [](const action_invocation_t&) {
-            const auto result = struct_recon_view::copy_current_declaration();
-            return result.completed ? action_handler_result_t::completed()
-                                    : action_handler_result_t::failed(result.detail);
+            auto& hooks = aida::qt::analysis::analysis_host_hooks();
+            std::string detail;
+            const bool completed = hooks.recon_copy_declaration &&
+                hooks.recon_copy_declaration(detail);
+            return completed ? action_handler_result_t::completed()
+                             : action_handler_result_t::failed(
+                                 detail.empty()
+                                     ? "The analysis UI is not available"
+                                     : detail);
         }, [](const interaction_context_t&) {
-            return struct_recon_view::has_current_structure()
+            auto& hooks = aida::qt::analysis::analysis_host_hooks();
+            return hooks.recon_has_current_structure &&
+                   hooks.recon_has_current_structure()
                 ? capability_state_t::available()
                 : capability_state_t::unavailable("Reconstruct or load a structure first");
         }, false, {}, "category.types.reconstruction", "Types / Reconstruction");
@@ -3358,11 +3687,19 @@ void initialize(runtime_t& rt) {
 		"Review the generated declaration and base application before one reversible overlay transaction",
         menu_surfaces,
         [](const action_invocation_t&) {
-            const auto result = struct_recon_view::declare_and_apply_current();
-            return result.completed ? action_handler_result_t::completed()
-                                    : action_handler_result_t::failed(result.detail);
+            auto& hooks = aida::qt::analysis::analysis_host_hooks();
+            std::string detail;
+            const bool completed = hooks.recon_declare_and_apply &&
+                hooks.recon_declare_and_apply(detail);
+            return completed ? action_handler_result_t::completed()
+                             : action_handler_result_t::failed(
+                                 detail.empty()
+                                     ? "The analysis UI is not available"
+                                     : detail);
         }, [](const interaction_context_t&) {
-            if (!struct_recon_view::has_current_structure())
+            auto& hooks = aida::qt::analysis::analysis_host_hooks();
+            if (!hooks.recon_has_current_structure ||
+                !hooks.recon_has_current_structure())
                 return capability_state_t::unavailable("Reconstruct or load a structure first");
             return analysis_workspace_capability();
         }, true, {}, "category.types.reconstruction", "Types / Reconstruction");
@@ -3451,7 +3788,7 @@ void initialize(runtime_t& rt) {
             if (!relative)
                 return action_handler_result_t::failed(
                     "The active file is not inside an open Project Explorer root");
-            ImGui::SetClipboardText(relative->c_str());
+            copy_text_to_clipboard(relative->c_str());
             return action_handler_result_t::completed();
         }, [](const interaction_context_t&) {
             const auto editor = code_editor_widget::document_state();
@@ -3484,7 +3821,7 @@ void initialize(runtime_t& rt) {
             if (!file_browser::reveal_path(editor.filepath))
                 return action_handler_result_t::failed(
                     "The active file is not inside an open Project Explorer root");
-            const auto opened = application_views::open_or_focus(
+            const auto opened = host_open_or_focus(
                 stable_view_id_t("view.project_explorer"));
             return opened.ok() ? action_handler_result_t::completed()
                 : action_handler_result_t::failed(opened.detail);
@@ -3565,25 +3902,24 @@ void initialize(runtime_t& rt) {
                 : capability_state_t::unavailable("No analysis decompiler context is available");
         }, false, {}, "category.analysis.navigate", "Analysis / Navigate");
 
-    application_views::initialize();
     const auto canonical_view_capability = [](const stable_view_id_t& target,
                                               const interaction_context_t& context) {
-        const auto* descriptor = application_views::registry().find_descriptor(target);
+        const auto descriptor = host_find_view(target);
         if (!descriptor)
             return capability_state_t::unavailable("The view is no longer registered");
-        if (application_views::is_open(target) && !descriptor->closeable)
+        if (host_is_view_open(target) && !descriptor->closeable)
             return capability_state_t::unavailable("This required view cannot be closed");
-        return application_views::registry().evaluate(target, context);
+        return host_evaluate_view(target, context);
     };
     const auto canonical_view_check = [](const stable_view_id_t& target) {
-        return application_views::is_open(target)
+        return host_is_view_open(target)
             ? action_check_state_t::checked : action_check_state_t::unchecked;
     };
     const auto toggle_canonical_view = [&rt](const stable_view_id_t& target,
                                              const char* compatibility_action) {
-        const auto result = application_views::is_open(target)
-            ? application_views::close(target)
-            : application_views::open_or_focus(target);
+        const auto result = host_is_view_open(target)
+            ? host_close_view(target)
+            : host_open_or_focus(target);
         if (!result.ok())
             return action_handler_result_t::failed(result.detail);
         if (rt.shell.persist_workspace)
@@ -3616,65 +3952,20 @@ void initialize(runtime_t& rt) {
     register_view("view.pseudocode", "Pseudocode", "document.pseudocode");
     register_view("view.graph", "Graph", "document.graph");
     register_view("view.binary_map", "Binary Map", "view.analysis.binary_map");
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
     register_view("view.test_lab", "Test Lab", "view.test_lab", menu_surfaces);
-#endif
 
-    application_views::registry().for_each_descriptor([&](const view_descriptor_t& view) {
-        const std::string stable_id = compose_view_action_id(view.id);
-        const std::string label = std::string("Toggle ") + view.display_name;
-        const std::string category = std::string("View / ") + application_views::category_label(view.category);
-        register_action(rt, stable_id.c_str(), label.c_str(), "Open, focus, or close this dockable IDE view",
-            action_surface_t::application_menu | action_surface_t::command_palette |
-                action_surface_t::accessibility,
-            [id = view.id, toggle_canonical_view](const action_invocation_t&) {
-                return toggle_canonical_view(id, nullptr);
-            },
-            [id = view.id, canonical_view_capability](const interaction_context_t& context) {
-                return canonical_view_capability(id, context);
-            }, false,
-            [id = view.id, canonical_view_check](const interaction_context_t&) {
-                return canonical_view_check(id);
-            }, view_category_id(view.category), category.c_str());
-
-        std::string focus_id = "view.focus.";
-        focus_id.append(view.id.value());
-        const std::string focus_label = std::string("Focus ") + view.display_name;
-        action_surface_t focus_surfaces = action_surface_t::application_menu |
-            action_surface_t::command_palette | action_surface_t::accessibility;
-        if (view.id.value() == "view.recent" ||
-            view.id.value() == "view.background_tasks" ||
-            view.id.value() == "view.diagnostics" ||
-            view.id.value() == "view.output")
-            focus_surfaces = focus_surfaces | action_surface_t::toolbar;
-        if (view.id.value() == "view.programming.source_debug_console" ||
-            view.id.value() == "view.analysis.references" ||
-            view.id.value() == "view.analysis.deobfuscation")
-            focus_surfaces = focus_surfaces | action_surface_t::shortcut;
-        register_action(rt, focus_id.c_str(), focus_label.c_str(),
-            "Open this IDE view if needed, then move keyboard focus to it",
-            focus_surfaces,
-            [id = view.id](const action_invocation_t&) {
-                const auto result = application_views::open_or_focus(id);
-                return result.ok()
-                    ? action_handler_result_t::completed()
-                    : action_handler_result_t::failed(result.detail);
-            },
-            [id = view.id](const interaction_context_t& context) {
-                return application_views::registry().evaluate(id, context);
-            }, false, {}, view_category_id(view.category), category.c_str());
-    });
+    install_catalog_view_actions(rt);
 
     register_action(rt, "view.reopen_last_closed", "Reopen Last Closed View",
         "Reopen and focus the most recently closed IDE view",
         menu_surfaces | action_surface_t::context_menu,
         [](const action_invocation_t&) {
-            const auto result = application_views::reopen_last_closed();
+            const auto result = host_reopen_last_closed();
             return result.ok()
                 ? action_handler_result_t::completed(result.detail)
                 : action_handler_result_t::failed(result.detail);
         }, [](const interaction_context_t&) {
-            return application_views::can_reopen_last_closed()
+            return host_can_reopen_last_closed()
                 ? capability_state_t::available()
                 : capability_state_t::unavailable("No recently closed view is available");
         }, false, {}, "category.view", "View");
@@ -3682,7 +3973,7 @@ void initialize(runtime_t& rt) {
         "Reopen any closed views that belong to the default IDE shell",
         menu_surfaces,
         [](const action_invocation_t&) {
-            const auto result = application_views::open_default_missing();
+            const auto result = host_open_default_missing();
             return result.ok()
                 ? action_handler_result_t::completed(result.detail)
                 : action_handler_result_t::failed(result.detail);
@@ -3691,21 +3982,21 @@ void initialize(runtime_t& rt) {
         "Close the focused dockable view without stopping its backend activity",
         action_surface_t::command_palette | action_surface_t::accessibility,
         [](const action_invocation_t&) {
-            const auto focused = application_views::registry().focused_instance();
+            const auto focused = host_focused_instance();
             if (!focused)
                 return action_handler_result_t::failed("No dockable view has focus");
-            const auto result = application_views::close_instance(*focused);
+            const auto result = host_close_instance(*focused);
             return result.ok()
                 ? action_handler_result_t::completed()
                 : action_handler_result_t::failed(result.detail);
         }, [](const interaction_context_t&) {
-            const auto focused = application_views::registry().focused_instance();
+            const auto focused = host_focused_instance();
             if (!focused)
                 return capability_state_t::unavailable("No dockable view has focus");
-            const auto* descriptor = application_views::registry().find_descriptor(focused->view);
+            const auto descriptor = host_find_view(focused->view);
             if (!descriptor || !descriptor->closeable)
                 return capability_state_t::unavailable("The focused view cannot be closed");
-            return application_views::is_pinned(*focused)
+            return host_is_pinned(*focused)
                 ? capability_state_t::unavailable("Unpin the focused view before closing it")
                 : capability_state_t::available();
         }, false, {}, "category.view", "View");
@@ -3714,116 +4005,114 @@ void initialize(runtime_t& rt) {
         context_surfaces,
         [](const action_invocation_t& invocation) {
             const auto* surface = view_surface(invocation.context);
-            return surface ? surface_operation(application_views::close_instance(surface->instance)) :
+            return surface ? surface_operation(host_close_instance(surface->instance)) :
                 action_handler_result_t::failed("The target view context is unavailable");
         }, surface_close_capability, false, {}, "category.view.surface", "View / Surface");
     register_action(rt, "surface.close_others", "Close Others", "Close every other closeable unpinned IDE view",
         context_surfaces,
         [](const action_invocation_t& invocation) {
             const auto* surface = view_surface(invocation.context);
-            return surface ? surface_operation(application_views::close_other_instances(surface->instance)) :
+            return surface ? surface_operation(host_close_other_instances(surface->instance)) :
                 action_handler_result_t::failed("The target view context is unavailable");
         }, surface_close_others_capability, false, {}, "category.view.surface", "View / Surface");
     register_action(rt, "surface.float", "Float", "Undock this view without forcing a new position or size",
         context_surfaces,
         [](const action_invocation_t& invocation) {
             const auto* surface = view_surface(invocation.context);
-            return surface ? workspace_result(workspace_layout::float_window(surface->window_name),
+            return surface ? workspace_result(host_float_window(surface->window_name),
                 "The view could not be floated") : action_handler_result_t::failed("The target view context is unavailable");
         }, [](const interaction_context_t& context) { return surface_placement_capability(context, std::nullopt); },
         false, {}, "category.view.surface", "View / Surface");
     const auto register_surface_dock = [&rt](const char* id, const char* label,
-            const char* description, workspace_layout::dock_role_t role) {
+            const char* description, dock_region_t role) {
         register_action(rt, id, label, description, context_surfaces,
             [role](const action_invocation_t& invocation) {
                 const auto* surface = view_surface(invocation.context);
-                return surface ? workspace_result(workspace_layout::dock_window(surface->window_name, role),
+                return surface ? workspace_result(host_dock_window(surface->window_name, role),
                     "The view could not be moved to that dock region") :
                     action_handler_result_t::failed("The target view context is unavailable");
             }, [role](const interaction_context_t& context) {
                 return surface_placement_capability(context, role);
             }, false, {}, "category.view.surface", "View / Surface");
     };
-    register_surface_dock("surface.move_left", "Move Left", "Dock this view in the left navigator region", workspace_layout::dock_role_t::navigator);
-    register_surface_dock("surface.move_right", "Move Right", "Dock this view in the right inspector region", workspace_layout::dock_role_t::inspector);
-    register_surface_dock("surface.move_bottom", "Move Bottom", "Dock this view in the bottom output region", workspace_layout::dock_role_t::bottom);
-    register_surface_dock("surface.move_center", "Move Center", "Dock this view in the central document region", workspace_layout::dock_role_t::documents);
+    register_surface_dock("surface.move_left", "Move Left", "Dock this view in the left navigator region", dock_region_t::navigator);
+    register_surface_dock("surface.move_right", "Move Right", "Dock this view in the right inspector region", dock_region_t::inspector);
+    register_surface_dock("surface.move_bottom", "Move Bottom", "Dock this view in the bottom output region", dock_region_t::bottom);
+    register_surface_dock("surface.move_center", "Move Center", "Dock this view in the central document region", dock_region_t::documents);
     register_action(rt, "surface.pin", "Pin View", "Keep this view out of close and close-others operations",
         context_surfaces,
         [](const action_invocation_t& invocation) {
             const auto* surface = view_surface(invocation.context);
-            return surface ? surface_operation(application_views::toggle_pin(surface->instance)) :
+            return surface ? surface_operation(host_toggle_pin(surface->instance)) :
                 action_handler_result_t::failed("The target view context is unavailable");
         }, live_surface_capability, false,
         [](const interaction_context_t& context) {
             const auto* surface = view_surface(context);
-            return surface && application_views::is_pinned(surface->instance)
+            return surface && host_is_pinned(surface->instance)
                 ? action_check_state_t::checked : action_check_state_t::unchecked;
         }, "category.view.surface", "View / Surface");
     register_action(rt, "surface.duplicate", "Duplicate", "Create an independent second instance only when its renderer declares that safe",
         context_surfaces,
         [](const action_invocation_t& invocation) {
             const auto* surface = view_surface(invocation.context);
-            return surface ? surface_operation(application_views::duplicate_instance(surface->instance)) :
+            return surface ? surface_operation(host_duplicate_instance(surface->instance)) :
                 action_handler_result_t::failed("The target view context is unavailable");
         }, [](const interaction_context_t& context) {
             const auto live = live_surface_capability(context);
             if (!live.enabled) return live;
             const auto* surface = view_surface(context);
-            return application_views::can_duplicate(surface->instance) ? capability_state_t::available() :
+            return host_can_duplicate(surface->instance) ? capability_state_t::available() :
                 capability_state_t::unavailable("This renderer does not declare independent duplicate state");
         }, false, {}, "category.view.surface", "View / Surface");
     register_action(rt, "surface.reset_state", "Reset View State", "Reset local scroll and ImGui open-state without changing backend data or layout",
         context_surfaces,
         [](const action_invocation_t& invocation) {
             const auto* surface = view_surface(invocation.context);
-            return surface ? surface_operation(application_views::request_reset_state(surface->instance)) :
+            return surface ? surface_operation(host_request_reset_state(surface->instance)) :
                 action_handler_result_t::failed("The target view context is unavailable");
         }, [](const interaction_context_t& context) {
             const auto live = live_surface_capability(context);
             if (!live.enabled) return live;
             const auto* surface = view_surface(context);
-            return application_views::can_reset_state(surface->instance) ? capability_state_t::available() :
+            return host_can_reset_state(surface->instance) ? capability_state_t::available() :
                 capability_state_t::unavailable("This view has no resettable local UI state");
         }, false, {}, "category.view.surface", "View / Surface");
 
-    std::size_t preset_count = 0;
-    const auto* presets = workspace_layout::presets(preset_count);
     const auto workspace_action_capability = [](const interaction_context_t&) {
-        if (workspace_layout::node_id(workspace_layout::dock_role_t::root) == 0)
+        if (!host_dock_space_ready())
             return capability_state_t::unavailable("The DockSpace is not ready yet");
-        if (workspace_layout::operation_pending()) {
-            const std::string status = workspace_layout::operation_status();
+        if (host_operation_pending()) {
+            const std::string status = host_operation_status();
             return capability_state_t::unavailable(status.empty()
                 ? "A workspace layout transaction is already in progress" : status);
         }
         return capability_state_t::available();
     };
-    const auto activate_workspace = [](workspace_layout::workspace_preset_t preset) {
-        const auto switched = workspace_layout::switch_to(preset);
+    const auto activate_workspace = [](workspace_preset_t preset) {
+        const auto switched = host_switch_workspace(preset);
         const auto result = workspace_result(switched, "Workspace switching failed");
-        if (switched != workspace_layout::workspace_request_result_t::completed &&
-            switched != workspace_layout::workspace_request_result_t::unchanged)
+        if (switched != workspace_request_result_t::completed &&
+            switched != workspace_request_result_t::unchanged)
             return result;
-        const char* primary_document = preset == workspace_layout::workspace_preset_t::analysis
+        const char* primary_document = preset == workspace_preset_t::analysis
             ? "document.disassembly"
-            : preset == workspace_layout::workspace_preset_t::programming
+            : preset == workspace_preset_t::programming
                 ? "document.code" : nullptr;
         if (!primary_document)
             return result;
-        const auto opened = application_views::open_or_focus(
+        const auto opened = host_open_or_focus(
             stable_view_id_t(primary_document));
         return opened.ok() ? result : action_handler_result_t::failed(opened.detail);
     };
-    const auto workspace_check = [](workspace_layout::workspace_preset_t preset) {
-        const auto identity = workspace_layout::active_identity();
-        return identity.kind == workspace_layout::workspace_identity_kind_t::built_in &&
+    const auto workspace_check = [](workspace_preset_t preset) {
+        const auto identity = host_active_identity();
+        return identity.kind == workspace_identity_kind_t::built_in &&
             identity.preset == preset
             ? action_check_state_t::checked : action_check_state_t::unchecked;
     };
-    for (std::size_t index = 0; index < preset_count; ++index) {
-        const auto preset = presets[index];
-        if (preset.id == workspace_layout::workspace_preset_t::safe)
+    for (std::size_t index = 0; index < k_workspace_preset_count; ++index) {
+        const auto preset = k_workspace_presets[index];
+        if (preset.id == workspace_preset_t::safe)
             continue;
         std::string id = "workspace.switch.";
         id.append(preset.stable_id);
@@ -3841,7 +4130,7 @@ void initialize(runtime_t& rt) {
             }, "category.workspace", "Workspace");
     }
     const auto register_workspace_alias = [&](const char* id, const char* label,
-                                               workspace_layout::workspace_preset_t preset) {
+                                               workspace_preset_t preset) {
         register_action(rt, id, label,
             "Compatibility launcher for the canonical named IDE workspace",
             action_surface_t::shortcut,
@@ -3856,28 +4145,28 @@ void initialize(runtime_t& rt) {
             }, "category.workspace", "Workspace");
     };
     register_workspace_alias("view.analysis", "Analysis",
-        workspace_layout::workspace_preset_t::analysis);
+        workspace_preset_t::analysis);
     register_workspace_alias("view.workbench", "Workbench",
-        workspace_layout::workspace_preset_t::analysis);
+        workspace_preset_t::analysis);
     register_workspace_alias("view.debugger", "Debugger",
-        workspace_layout::workspace_preset_t::debugging);
+        workspace_preset_t::debugging);
     register_workspace_alias("view.network", "Network",
-        workspace_layout::workspace_preset_t::network);
+        workspace_preset_t::network);
     register_workspace_alias("view.scan", "Scan",
-        workspace_layout::workspace_preset_t::memory);
+        workspace_preset_t::memory);
     register_workspace_alias("view.types", "Types",
-        workspace_layout::workspace_preset_t::types_structures);
+        workspace_preset_t::types_structures);
 
     register_action(rt, "workspace.lock", "Lock / Unlock Layout", "Toggle dock placement editing while preserving close and reopen",
         action_surface_t::application_menu | action_surface_t::command_palette |
             action_surface_t::context_menu | action_surface_t::accessibility,
         [](const action_invocation_t&) {
             return workspace_result(
-                workspace_layout::set_layout_locked(!workspace_layout::layout_locked()),
+                host_set_layout_locked(!host_layout_locked()),
                 "Changing the workspace lock failed");
         }, workspace_action_capability, false,
         [](const interaction_context_t&) {
-            return workspace_layout::layout_locked()
+            return host_layout_locked()
                 ? action_check_state_t::checked
                 : action_check_state_t::unchecked;
         }, "category.workspace", "Workspace");
@@ -3885,14 +4174,14 @@ void initialize(runtime_t& rt) {
         action_surface_t::application_menu | action_surface_t::command_palette |
             action_surface_t::context_menu | action_surface_t::accessibility,
         [](const action_invocation_t&) {
-            return workspace_result(workspace_layout::save_active_user_layout(),
+            return workspace_result(host_save_active_user_layout(),
                 "Saving the active workspace failed");
         }, [workspace_action_capability](const interaction_context_t& context) {
             const auto base = workspace_action_capability(context);
             if (!base.enabled)
                 return base;
-            return workspace_layout::active_identity().kind ==
-                workspace_layout::workspace_identity_kind_t::user
+            return host_active_identity().kind ==
+                workspace_identity_kind_t::user
                 ? capability_state_t::available()
                 : capability_state_t::unavailable("Use Save Workspace As to create a named workspace first");
         }, false, {}, "category.workspace", "Workspace");
@@ -3908,7 +4197,7 @@ void initialize(runtime_t& rt) {
             const auto base = workspace_action_capability(context);
             if (!base.enabled)
                 return base;
-            if (!workspace_layout::user_layout_catalog_ready())
+            if (!host_catalog_ready())
                 return capability_state_t::unavailable("The saved workspace catalog is still loading");
             return rt.shell.open_workspace_save_as ? capability_state_t::available() :
                 capability_state_t::unavailable("The Save Workspace As dialog is unavailable");
@@ -3917,9 +4206,9 @@ void initialize(runtime_t& rt) {
         action_surface_t::application_menu | action_surface_t::command_palette |
             action_surface_t::context_menu | action_surface_t::accessibility,
         [&rt](const action_invocation_t&) {
-            if (workspace_layout::active_identity().kind ==
-                workspace_layout::workspace_identity_kind_t::user)
-                return workspace_result(workspace_layout::save_active_user_layout(),
+            if (host_active_identity().kind ==
+                workspace_identity_kind_t::user)
+                return workspace_result(host_save_active_user_layout(),
                     "Saving the active workspace failed");
             if (!rt.shell.open_workspace_save_as)
                 return action_handler_result_t::failed("The Save Workspace As dialog is unavailable");
@@ -3929,10 +4218,10 @@ void initialize(runtime_t& rt) {
             const auto base = workspace_action_capability(context);
             if (!base.enabled)
                 return base;
-            if (workspace_layout::active_identity().kind ==
-                workspace_layout::workspace_identity_kind_t::user)
+            if (host_active_identity().kind ==
+                workspace_identity_kind_t::user)
                 return capability_state_t::available();
-            if (!workspace_layout::user_layout_catalog_ready())
+            if (!host_catalog_ready())
                 return capability_state_t::unavailable("The saved workspace catalog is still loading");
             return rt.shell.open_workspace_save_as ? capability_state_t::available() :
                 capability_state_t::unavailable("The Save Workspace As dialog is unavailable");
@@ -3952,13 +4241,13 @@ void initialize(runtime_t& rt) {
     register_action(rt, "workspace.restore_builtin", "Restore Built-in Workspace", "Restore the active preset's factory layout",
         action_surface_t::application_menu | action_surface_t::command_palette | action_surface_t::accessibility,
         [](const action_invocation_t&) {
-            return workspace_result(workspace_layout::restore_builtin(workspace_layout::active_preset()),
+            return workspace_result(host_restore_builtin(host_active_preset()),
                 "Restoring the built-in workspace failed");
         }, workspace_action_capability, false, {}, "category.workspace", "Workspace");
     register_action(rt, "workspace.reset_current", "Reset Current Layout", "Restore the current preset's built-in layout without deleting named workspace derivatives",
         action_surface_t::application_menu | action_surface_t::command_palette | action_surface_t::accessibility,
         [](const action_invocation_t&) {
-            return workspace_result(workspace_layout::reset_current(), "Resetting the layout failed");
+            return workspace_result(host_reset_current_layout(), "Resetting the layout failed");
         }, workspace_action_capability, false, {}, "category.workspace", "Workspace");
     register_action(rt, "workspace.reset_all", "Reset All Layouts", "Discard every saved preset and named user layout, then activate the factory Analysis workspace",
         action_surface_t::application_menu | action_surface_t::command_palette | action_surface_t::accessibility,
@@ -3977,12 +4266,12 @@ void initialize(runtime_t& rt) {
     register_action(rt, "workspace.open_missing", "Open Missing Workspace Views", "Reopen views required by the active workspace",
         action_surface_t::application_menu | action_surface_t::command_palette | action_surface_t::accessibility,
         [](const action_invocation_t&) {
-            return workspace_result(workspace_layout::open_missing_views(), "Opening missing views failed");
+            return workspace_result(host_open_missing_views(), "Opening missing views failed");
         }, [workspace_action_capability](const interaction_context_t& context) {
             const auto base = workspace_action_capability(context);
             if (!base.enabled)
                 return base;
-            return workspace_layout::layout_locked()
+            return host_layout_locked()
                 ? capability_state_t::unavailable("Unlock the layout before placing missing views")
                 : capability_state_t::available();
         }, false, {}, "category.workspace", "Workspace");
@@ -3990,7 +4279,7 @@ void initialize(runtime_t& rt) {
         action_surface_t::application_menu | action_surface_t::toolbar |
             action_surface_t::command_palette | action_surface_t::accessibility,
         [](const action_invocation_t&) {
-            return workspace_result(workspace_layout::activate_safe_layout(), "Safe Layout recovery failed");
+            return workspace_result(host_activate_safe_layout(), "Safe Layout recovery failed");
         }, workspace_action_capability, false, {}, "category.workspace", "Workspace");
 
     const auto shell_capability = [](const std::function<void()>& callback, const char* reason) {
@@ -4137,37 +4426,37 @@ void initialize(runtime_t& rt) {
         "Permanently removes retained TLS secrets used for later traffic decryption");
 
 	const auto register_memory_scan_action = [&rt](const char* id, const char* label,
-		const char* description, memory_scanner_view::scan_command_t command) {
+		const char* description, aida::qt::scanner::scan_command_t command) {
 		register_action(rt, id, label, description,
 			action_surface_t::application_menu | action_surface_t::toolbar |
 			action_surface_t::command_palette | action_surface_t::shortcut |
 			action_surface_t::accessibility,
 			[command](const action_invocation_t&) {
-				const auto result = memory_scanner_view::execute_scan_command(command);
+				const auto result = aida::qt::scanner::execute_scan_command(command);
 				return result.succeeded
 					? action_handler_result_t::completed(result.detail)
 					: action_handler_result_t::failed(result.detail);
 			}, [command](const interaction_context_t&) {
-				const auto state = memory_scanner_view::scan_command_capability(command);
+				const auto state = aida::qt::scanner::scan_command_capability(command);
 				return state.enabled ? capability_state_t::available()
 					: capability_state_t::unavailable(state.disabled_reason);
 			}, false, {}, "category.memory", "Memory");
 	};
 	register_memory_scan_action("memory.first_scan", "First Scan",
 		"Start an initial value scan using the current type, mode, value, range, and live target",
-		memory_scanner_view::scan_command_t::first_scan);
+		aida::qt::scanner::scan_command_t::first_scan);
 	register_memory_scan_action("memory.next_scan", "Next Scan",
 		"Refine the current value-scan result generation using the configured comparison",
-		memory_scanner_view::scan_command_t::next_scan);
+		aida::qt::scanner::scan_command_t::next_scan);
 	register_memory_scan_action("memory.stop_scan", "Stop Scan",
 		"Request safe cancellation of the active value-scan task without discarding completed state",
-		memory_scanner_view::scan_command_t::stop_scan);
+		aida::qt::scanner::scan_command_t::stop_scan);
 	register_memory_scan_action("memory.undo_scan", "Undo Scan",
 		"Restore the previous completed value-scan result generation",
-		memory_scanner_view::scan_command_t::undo_scan);
+		aida::qt::scanner::scan_command_t::undo_scan);
 	register_memory_scan_action("memory.new_scan", "New Scan",
 		"Clear scan results and history while preserving the address list and current scan configuration",
-		memory_scanner_view::scan_command_t::new_scan);
+		aida::qt::scanner::scan_command_t::new_scan);
 
 	const auto register_debugger_action = [&rt](const char* id, const char* label,
 		const char* description, debugger_view::execution_command_t command) {
@@ -4344,13 +4633,16 @@ void initialize(runtime_t& rt) {
     register_action(rt, "view.command_palette", "Command Palette", "Search and run every registered human action",
         action_surface_t::application_menu | action_surface_t::shortcut | action_surface_t::accessibility,
         [](const action_invocation_t&) {
-            globals::ui::command_palette_open = !globals::ui::command_palette_open;
-            return action_handler_result_t::completed();
+            if (runtime().command_palette_toggle_hook) {
+                runtime().command_palette_toggle_hook();
+                return action_handler_result_t::completed();
+            }
+            return action_handler_result_t::failed("The command palette is unavailable");
         }, {}, false, {}, "category.view", "View");
     register_action(rt, "view.global_search", "Search Workspace", "Search text across the open source workspace",
         menu_surfaces,
         [](const action_invocation_t&) {
-            const auto result = application_views::open_or_focus(
+            const auto result = host_open_or_focus(
                 stable_view_id_t("view.workspace_search"));
             return result.ok()
                 ? action_handler_result_t::completed()
@@ -4368,10 +4660,10 @@ void initialize(runtime_t& rt) {
             return action_handler_result_t::completed();
         }, [&rt](const interaction_context_t&) { return single_explorer_selection(rt.explorer); });
     register_action(rt, "explorer.copy_path", "Copy Path", "Copy the full path", context_surfaces,
-        [&rt](const action_invocation_t&) { ImGui::SetClipboardText(rt.explorer.path.c_str()); return action_handler_result_t::completed(); },
+        [&rt](const action_invocation_t&) { copy_text_to_clipboard(rt.explorer.path.c_str()); return action_handler_result_t::completed(); },
         [&rt](const interaction_context_t&) { return single_explorer_selection(rt.explorer); });
     register_action(rt, "explorer.copy_name", "Copy Name", "Copy the item name", context_surfaces,
-        [&rt](const action_invocation_t&) { ImGui::SetClipboardText(rt.explorer.name.c_str()); return action_handler_result_t::completed(); },
+        [&rt](const action_invocation_t&) { copy_text_to_clipboard(rt.explorer.name.c_str()); return action_handler_result_t::completed(); },
         [&rt](const interaction_context_t&) { return single_explorer_selection(rt.explorer); });
     register_action(rt, "explorer.copy_relative_path", "Copy Workspace-Relative Path",
         "Copy the selected item path relative to its Project Explorer root", context_surfaces,
@@ -4380,7 +4672,7 @@ void initialize(runtime_t& rt) {
             if (!relative)
                 return action_handler_result_t::failed(
                     "The selected item is not inside an open Project Explorer root");
-            ImGui::SetClipboardText(relative->c_str());
+            copy_text_to_clipboard(relative->c_str());
             return action_handler_result_t::completed();
         }, [&rt](const interaction_context_t&) {
             const auto single = single_explorer_selection(rt.explorer);
@@ -4402,7 +4694,7 @@ void initialize(runtime_t& rt) {
     register_action(rt, "explorer.search", "Search Workspace", "Open workspace search",
         context_surfaces | action_surface_t::toolbar,
         [](const action_invocation_t&) {
-            const auto result = application_views::open_or_focus(stable_view_id_t("view.workspace_search"));
+            const auto result = host_open_or_focus(stable_view_id_t("view.workspace_search"));
             return result.ok() ? action_handler_result_t::completed() : action_handler_result_t::failed(result.detail);
         });
     register_action(rt, "explorer.search_here", "Search Here",
@@ -4572,10 +4864,10 @@ void initialize(runtime_t& rt) {
                 : capability_state_t::available();
         });
     register_action(rt, "workspace_search.copy_path", "Copy Path", "Copy the result file path", context_surfaces,
-        [&rt](const action_invocation_t&) { ImGui::SetClipboardText(rt.workspace_search.path.c_str()); return action_handler_result_t::completed(); },
+        [&rt](const action_invocation_t&) { copy_text_to_clipboard(rt.workspace_search.path.c_str()); return action_handler_result_t::completed(); },
         [&rt](const interaction_context_t&) { return rt.workspace_search.path.empty() ? capability_state_t::unavailable("The result has no path") : capability_state_t::available(); });
     register_action(rt, "workspace_search.copy_line", "Copy Matching Line", "Copy the matching source line", context_surfaces,
-        [&rt](const action_invocation_t&) { ImGui::SetClipboardText(rt.workspace_search.line_text.c_str()); return action_handler_result_t::completed(); },
+        [&rt](const action_invocation_t&) { copy_text_to_clipboard(rt.workspace_search.line_text.c_str()); return action_handler_result_t::completed(); },
         [&rt](const interaction_context_t&) { return rt.workspace_search.line_text.empty() ? capability_state_t::unavailable("The matching line is empty") : capability_state_t::available(); });
     register_action(rt, "workspace_search.add_to_chat", "Add Result to AI Chat",
         "Send the bounded matching source location to AI Chat with workspace identity",
@@ -4621,7 +4913,7 @@ void initialize(runtime_t& rt) {
                 : capability_state_t::unavailable("This recent item is not an open session");
         });
     register_action(rt, "recent.copy_path", "Copy Path", "Copy the binary path", context_surfaces,
-        [&rt](const action_invocation_t&) { ImGui::SetClipboardText(rt.recent.path.c_str()); return action_handler_result_t::completed(); },
+        [&rt](const action_invocation_t&) { copy_text_to_clipboard(rt.recent.path.c_str()); return action_handler_result_t::completed(); },
         [&rt](const interaction_context_t&) { return rt.recent.path.empty() ? capability_state_t::unavailable("The item has no path") : capability_state_t::available(); });
 
     const auto output_tab = [&rt]() { return static_cast<bottom_tab_t>(rt.output.tab); };
@@ -5016,7 +5308,7 @@ void initialize(runtime_t& rt) {
             if (group == 0)
                 return action_handler_result_t::failed("The tab is no longer open");
             file_tabs::switch_to(rt.tab.index);
-            const auto result = application_views::open_or_focus(stable_view_id_t("document.code"));
+            const auto result = host_open_or_focus(stable_view_id_t("document.code"));
             return result.ok() ? action_handler_result_t::completed()
                                : action_handler_result_t::failed(result.detail);
         }, [&rt](const interaction_context_t&) {
@@ -5027,13 +5319,13 @@ void initialize(runtime_t& rt) {
     struct editor_split_action_t {
         const char* id;
         const char* label;
-        workspace_layout::dock_split_direction_t direction;
+        dock_split_direction_t direction;
     };
     for (const auto& split : std::array<editor_split_action_t, 4>{{
-            {"tab.split_left", "Split Editor Left", workspace_layout::dock_split_direction_t::left},
-            {"tab.split_right", "Split Editor Right", workspace_layout::dock_split_direction_t::right},
-            {"tab.split_up", "Split Editor Up", workspace_layout::dock_split_direction_t::up},
-            {"tab.split_down", "Split Editor Down", workspace_layout::dock_split_direction_t::down}}}) {
+            {"tab.split_left", "Split Editor Left", dock_split_direction_t::left},
+            {"tab.split_right", "Split Editor Right", dock_split_direction_t::right},
+            {"tab.split_up", "Split Editor Up", dock_split_direction_t::up},
+            {"tab.split_down", "Split Editor Down", dock_split_direction_t::down}}}) {
         register_action(rt, split.id, split.label,
             "Move this document into a new dockable editor group in the explicit direction",
             context_surfaces,
@@ -5044,13 +5336,13 @@ void initialize(runtime_t& rt) {
                 if (!anchor_instance)
                     return action_handler_result_t::failed("The editor group is no longer available");
                 const std::string anchor_window =
-                    application_views::registry().window_name(*anchor_instance);
+                    host_window_name(*anchor_instance);
                 const std::uint32_t original_group = file_tabs::tabs[
                     file_tabs::tab_index(rt.tab.index)].group_id;
                 if (file_tabs::create_group_for_tab(rt.tab.index) == 0)
                     return action_handler_result_t::failed("The tab is no longer open");
                 file_tabs::switch_to(rt.tab.index);
-                const auto opened = application_views::open_or_focus(
+                const auto opened = host_open_or_focus(
                     stable_view_id_t("document.code"));
                 const auto split_instance = code_group_instance(rt.tab.index);
                 if (!opened.ok() || !split_instance) {
@@ -5059,12 +5351,12 @@ void initialize(runtime_t& rt) {
                         ? "The new editor group was not registered" : opened.detail);
                 }
                 const std::string split_window_name =
-                    application_views::registry().window_name(*split_instance);
-                const auto result = workspace_layout::split_window(
+                    host_window_name(*split_instance);
+                const auto result = host_split_window(
                     split_window_name, anchor_window, direction);
-                if (result != workspace_layout::workspace_request_result_t::completed &&
-                    result != workspace_layout::workspace_request_result_t::queued &&
-                    result != workspace_layout::workspace_request_result_t::unchanged) {
+                if (result != workspace_request_result_t::completed &&
+                    result != workspace_request_result_t::queued &&
+                    result != workspace_request_result_t::unchanged) {
                     file_tabs::move_to_group(rt.tab.index, original_group);
                     return action_handler_result_t::failed(
                         "The workspace could not create the requested directional editor split");
@@ -5073,18 +5365,18 @@ void initialize(runtime_t& rt) {
             }, [&rt](const interaction_context_t&) {
                 if (!file_tabs::is_valid_tab_index(rt.tab.index))
                     return capability_state_t::unavailable("The tab is no longer open");
-                if (workspace_layout::operation_pending())
+                if (host_operation_pending())
                     return capability_state_t::unavailable(
                         "A workspace layout transaction is already in progress");
-                if (workspace_layout::layout_locked())
+                if (host_layout_locked())
                     return capability_state_t::unavailable(
                         "Unlock the workspace layout before splitting editor groups");
                 const auto instance = code_group_instance(rt.tab.index);
                 if (!instance)
                     return capability_state_t::unavailable(
                         "The editor group is no longer available");
-                const auto placement = workspace_layout::inspect_window_placement(
-                    application_views::registry().window_name(*instance));
+                const auto placement = host_inspect_placement(
+                    host_window_name(*instance));
                 return placement.docked ? capability_state_t::available()
                     : capability_state_t::unavailable(
                         "Dock this editor group before creating a directional split");
@@ -5136,10 +5428,10 @@ void initialize(runtime_t& rt) {
                 : capability_state_t::unavailable("This editor group has no next document");
         });
     register_action(rt, "tab.copy_path", "Copy Path", "Copy the tab path", context_surfaces,
-        [&rt](const action_invocation_t&) { ImGui::SetClipboardText(rt.tab.path.c_str()); return action_handler_result_t::completed(); },
+        [&rt](const action_invocation_t&) { copy_text_to_clipboard(rt.tab.path.c_str()); return action_handler_result_t::completed(); },
         [&rt](const interaction_context_t&) { return rt.tab.path.empty() ? capability_state_t::unavailable("This untitled tab has no path") : capability_state_t::available(); });
     register_action(rt, "tab.copy_name", "Copy Name", "Copy the tab name", context_surfaces,
-        [&rt](const action_invocation_t&) { ImGui::SetClipboardText(rt.tab.name.c_str()); return action_handler_result_t::completed(); });
+        [&rt](const action_invocation_t&) { copy_text_to_clipboard(rt.tab.name.c_str()); return action_handler_result_t::completed(); });
     register_action(rt, "tab.copy_relative_path", "Copy Workspace-Relative Path",
         "Copy this document path relative to its Project Explorer root", context_surfaces,
         [&rt](const action_invocation_t&) {
@@ -5147,7 +5439,7 @@ void initialize(runtime_t& rt) {
             if (!relative)
                 return action_handler_result_t::failed(
                     "This document is not inside an open Project Explorer root");
-            ImGui::SetClipboardText(relative->c_str());
+            copy_text_to_clipboard(relative->c_str());
             return action_handler_result_t::completed();
         }, [&rt](const interaction_context_t&) {
             if (rt.tab.path.empty())
@@ -5176,7 +5468,7 @@ void initialize(runtime_t& rt) {
             if (!file_browser::reveal_path(rt.tab.path))
                 return action_handler_result_t::failed(
                     "This document is not inside an open Project Explorer root");
-            const auto opened = application_views::open_or_focus(
+            const auto opened = host_open_or_focus(
                 stable_view_id_t("view.project_explorer"));
             return opened.ok() ? action_handler_result_t::completed()
                 : action_handler_result_t::failed(opened.detail);
@@ -5195,24 +5487,24 @@ void initialize(runtime_t& rt) {
             const auto instance = code_group_instance(rt.tab.index);
             if (!instance)
                 return action_handler_result_t::failed("The editor tab is no longer open");
-            const std::string& window = application_views::registry().window_name(*instance);
+            const std::string& window = host_window_name(*instance);
             if (window.empty())
                 return action_handler_result_t::failed(
                     "The editor group window has not been realized yet");
-            return workspace_result(workspace_layout::float_window(window),
+            return workspace_result(host_float_window(window),
                 "The editor group could not be floated");
         }, [&rt](const interaction_context_t&) {
             const auto instance = code_group_instance(rt.tab.index);
             if (!instance)
                 return capability_state_t::unavailable("The editor tab is no longer open");
-            if (workspace_layout::operation_pending())
+            if (host_operation_pending())
                 return capability_state_t::unavailable(
                     "A workspace layout transaction is already in progress");
-            if (workspace_layout::layout_locked())
+            if (host_layout_locked())
                 return capability_state_t::unavailable(
                     "Unlock the workspace layout before floating editor groups");
-            const std::string& window = application_views::registry().window_name(*instance);
-            const auto placement = workspace_layout::inspect_window_placement(window);
+            const std::string& window = host_window_name(*instance);
+            const auto placement = host_inspect_placement(window);
             if (!placement.realized)
                 return capability_state_t::unavailable(
                     "The editor group window has not been realized yet");
@@ -5220,213 +5512,213 @@ void initialize(runtime_t& rt) {
                 : capability_state_t::unavailable("This editor group is already floating");
         });
 
-    register_shortcut(rt, "binding.editor.save", "file.save", ImGuiMod_Ctrl | ImGuiKey_S, "Ctrl+S");
-    register_shortcut(rt, "binding.editor.undo", "edit.undo", ImGuiMod_Ctrl | ImGuiKey_Z, "Ctrl+Z", true);
-    register_shortcut(rt, "binding.editor.redo", "edit.redo", ImGuiMod_Ctrl | ImGuiKey_Y, "Ctrl+Y", true);
+    register_shortcut(rt, "binding.editor.save", "file.save", chord::mod_ctrl | chord::k_s, "Ctrl+S");
+    register_shortcut(rt, "binding.editor.undo", "edit.undo", chord::mod_ctrl | chord::k_z, "Ctrl+Z", true);
+    register_shortcut(rt, "binding.editor.redo", "edit.redo", chord::mod_ctrl | chord::k_y, "Ctrl+Y", true);
     register_shortcut(rt, "binding.editor.redo_alternate", "edit.redo",
-        ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Z, "Ctrl+Shift+Z", true);
-    register_shortcut(rt, "binding.editor.cut", "edit.cut", ImGuiMod_Ctrl | ImGuiKey_X, "Ctrl+X");
-    register_shortcut(rt, "binding.editor.copy", "edit.copy", ImGuiMod_Ctrl | ImGuiKey_C, "Ctrl+C");
-    register_shortcut(rt, "binding.editor.paste", "edit.paste", ImGuiMod_Ctrl | ImGuiKey_V, "Ctrl+V");
-    register_shortcut(rt, "binding.editor.delete", "edit.delete", ImGuiKey_Delete, "Delete", true);
-    register_shortcut(rt, "binding.editor.select_all", "edit.select_all", ImGuiMod_Ctrl | ImGuiKey_A, "Ctrl+A");
-    register_shortcut(rt, "binding.editor.find", "edit.find", ImGuiMod_Ctrl | ImGuiKey_F, "Ctrl+F");
-    register_shortcut(rt, "binding.editor.replace", "edit.replace", ImGuiMod_Ctrl | ImGuiKey_H, "Ctrl+H");
-    register_shortcut(rt, "binding.editor.goto", "edit.goto_line", ImGuiMod_Ctrl | ImGuiKey_G, "Ctrl+G");
-    register_shortcut(rt, "binding.editor.quick_open", "file.quick_open", ImGuiMod_Ctrl | ImGuiKey_P, "Ctrl+P");
-    register_shortcut(rt, "binding.editor.close", "file.close", ImGuiMod_Ctrl | ImGuiKey_W, "Ctrl+W");
+        chord::mod_ctrl | chord::mod_shift | chord::k_z, "Ctrl+Shift+Z", true);
+    register_shortcut(rt, "binding.editor.cut", "edit.cut", chord::mod_ctrl | chord::k_x, "Ctrl+X");
+    register_shortcut(rt, "binding.editor.copy", "edit.copy", chord::mod_ctrl | chord::k_c, "Ctrl+C");
+    register_shortcut(rt, "binding.editor.paste", "edit.paste", chord::mod_ctrl | chord::k_v, "Ctrl+V");
+    register_shortcut(rt, "binding.editor.delete", "edit.delete", chord::k_delete, "Delete", true);
+    register_shortcut(rt, "binding.editor.select_all", "edit.select_all", chord::mod_ctrl | chord::k_a, "Ctrl+A");
+    register_shortcut(rt, "binding.editor.find", "edit.find", chord::mod_ctrl | chord::k_f, "Ctrl+F");
+    register_shortcut(rt, "binding.editor.replace", "edit.replace", chord::mod_ctrl | chord::k_h, "Ctrl+H");
+    register_shortcut(rt, "binding.editor.goto", "edit.goto_line", chord::mod_ctrl | chord::k_g, "Ctrl+G");
+    register_shortcut(rt, "binding.editor.quick_open", "file.quick_open", chord::mod_ctrl | chord::k_p, "Ctrl+P");
+    register_shortcut(rt, "binding.editor.close", "file.close", chord::mod_ctrl | chord::k_w, "Ctrl+W");
     register_shortcut(rt, "binding.editor.save_all", "file.save_all",
-        ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_S, "Ctrl+Alt+S");
+        chord::mod_ctrl | chord::mod_alt | chord::k_s, "Ctrl+Alt+S");
     register_shortcut(rt, "binding.editor.copy_line", "edit.copy_line",
-        ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_C, "Ctrl+Shift+C");
+        chord::mod_ctrl | chord::mod_shift | chord::k_c, "Ctrl+Shift+C");
     register_shortcut(rt, "binding.editor.next_document_or_session",
-        "navigate.next_document_or_session", ImGuiMod_Ctrl | ImGuiKey_Tab, "Ctrl+Tab");
+        "navigate.next_document_or_session", chord::mod_ctrl | chord::k_tab, "Ctrl+Tab");
     register_shortcut(rt, "binding.editor.previous_document_or_session",
         "navigate.previous_document_or_session",
-        ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Tab, "Ctrl+Shift+Tab");
+        chord::mod_ctrl | chord::mod_shift | chord::k_tab, "Ctrl+Shift+Tab");
     register_shortcut(rt, "binding.editor.duplicate_line", "edit.duplicate_line",
-        ImGuiMod_Ctrl | ImGuiKey_D, "Ctrl+D");
+        chord::mod_ctrl | chord::k_d, "Ctrl+D");
     register_shortcut(rt, "binding.editor.delete_line", "edit.delete_line",
-        ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_K, "Ctrl+Shift+K");
+        chord::mod_ctrl | chord::mod_shift | chord::k_k, "Ctrl+Shift+K");
     register_shortcut(rt, "binding.editor.move_line_up", "edit.move_line_up",
-        ImGuiMod_Alt | ImGuiKey_UpArrow, "Alt+Up");
+        chord::mod_alt | chord::k_up_arrow, "Alt+Up");
     register_shortcut(rt, "binding.editor.move_line_down", "edit.move_line_down",
-        ImGuiMod_Alt | ImGuiKey_DownArrow, "Alt+Down");
+        chord::mod_alt | chord::k_down_arrow, "Alt+Down");
     register_shortcut(rt, "binding.editor.toggle_line_comment", "edit.toggle_line_comment",
-        ImGuiMod_Ctrl | ImGuiKey_Slash, "Ctrl+/");
+        chord::mod_ctrl | chord::k_slash, "Ctrl+/");
     register_shortcut(rt, "binding.editor.language.completion",
-        "programming.language.completion", ImGuiMod_Ctrl | ImGuiKey_Space,
+        "programming.language.completion", chord::mod_ctrl | chord::k_space,
         "Ctrl+Space");
     register_shortcut(rt, "binding.editor.language.definition",
-        "programming.language.definition", ImGuiKey_F12, "F12");
+        "programming.language.definition", chord::k_f12, "F12");
     register_shortcut(rt, "binding.editor.language.references",
-        "programming.language.references", ImGuiMod_Shift | ImGuiKey_F12,
+        "programming.language.references", chord::mod_shift | chord::k_f12,
         "Shift+F12");
     register_shortcut(rt, "binding.editor.language.outline",
         "programming.language.document_symbols",
-        ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_O, "Ctrl+Shift+O");
+        chord::mod_ctrl | chord::mod_shift | chord::k_o, "Ctrl+Shift+O");
     register_review_shortcut(rt, "binding.editor.ai.previous_pending_hunk",
-        "editor.ai.previous_pending_hunk", ImGuiMod_Alt | ImGuiKey_LeftBracket,
+        "editor.ai.previous_pending_hunk", chord::mod_alt | chord::k_left_bracket,
         "Alt+[");
     register_review_shortcut(rt, "binding.editor.ai.next_pending_hunk",
-        "editor.ai.next_pending_hunk", ImGuiMod_Alt | ImGuiKey_RightBracket,
+        "editor.ai.next_pending_hunk", chord::mod_alt | chord::k_right_bracket,
         "Alt+]");
     register_review_shortcut(rt, "binding.editor.ai.accept_current_hunk",
         "editor.ai.accept_current_hunk",
-        ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_Enter, "Ctrl+Alt+Enter");
+        chord::mod_ctrl | chord::mod_alt | chord::k_enter, "Ctrl+Alt+Enter");
     register_review_shortcut(rt, "binding.editor.ai.reject_current_hunk",
         "editor.ai.reject_current_hunk",
-        ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_Backspace, "Ctrl+Alt+Backspace");
-    register_global_shortcut(rt, "binding.global.new", "file.new", ImGuiMod_Ctrl | ImGuiKey_N, "Ctrl+N");
-    register_global_shortcut(rt, "binding.global.open", "file.open", ImGuiMod_Ctrl | ImGuiKey_O, "Ctrl+O");
-    register_global_shortcut(rt, "binding.global.open_folder", "file.open_folder", ImGuiMod_Ctrl | ImGuiKey_K, "Ctrl+K");
-    register_global_shortcut(rt, "binding.global.quick_open", "file.quick_open", ImGuiMod_Ctrl | ImGuiKey_P, "Ctrl+P");
-    register_global_shortcut(rt, "binding.global.save_as", "file.save_as", ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_S, "Ctrl+Shift+S");
-    register_global_shortcut(rt, "binding.global.explorer", "view.explorer", ImGuiMod_Ctrl | ImGuiKey_B, "Ctrl+B");
-    register_global_shortcut(rt, "binding.global.chat", "view.chat", ImGuiMod_Ctrl | ImGuiKey_J, "Ctrl+J");
-    register_global_shortcut(rt, "binding.global.output", "view.output", ImGuiMod_Ctrl | ImGuiKey_GraveAccent, "Ctrl+`");
-    register_global_shortcut(rt, "binding.global.network", "view.network", ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_N, "Ctrl+Shift+N");
-    register_global_shortcut(rt, "binding.global.debugger", "view.debugger", ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_D, "Ctrl+Shift+D");
+        chord::mod_ctrl | chord::mod_alt | chord::k_backspace, "Ctrl+Alt+Backspace");
+    register_global_shortcut(rt, "binding.global.new", "file.new", chord::mod_ctrl | chord::k_n, "Ctrl+N");
+    register_global_shortcut(rt, "binding.global.open", "file.open", chord::mod_ctrl | chord::k_o, "Ctrl+O");
+    register_global_shortcut(rt, "binding.global.open_folder", "file.open_folder", chord::mod_ctrl | chord::k_k, "Ctrl+K");
+    register_global_shortcut(rt, "binding.global.quick_open", "file.quick_open", chord::mod_ctrl | chord::k_p, "Ctrl+P");
+    register_global_shortcut(rt, "binding.global.save_as", "file.save_as", chord::mod_ctrl | chord::mod_shift | chord::k_s, "Ctrl+Shift+S");
+    register_global_shortcut(rt, "binding.global.explorer", "view.explorer", chord::mod_ctrl | chord::k_b, "Ctrl+B");
+    register_global_shortcut(rt, "binding.global.chat", "view.chat", chord::mod_ctrl | chord::k_j, "Ctrl+J");
+    register_global_shortcut(rt, "binding.global.output", "view.output", chord::mod_ctrl | chord::k_grave_accent, "Ctrl+`");
+    register_global_shortcut(rt, "binding.global.network", "view.network", chord::mod_ctrl | chord::mod_shift | chord::k_n, "Ctrl+Shift+N");
+    register_global_shortcut(rt, "binding.global.debugger", "view.debugger", chord::mod_ctrl | chord::mod_shift | chord::k_d, "Ctrl+Shift+D");
     register_global_shortcut(rt, "binding.global.source_debug_console",
         "view.focus.view.programming.source_debug_console",
-        ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_D, "Ctrl+Alt+D");
-    register_global_shortcut(rt, "binding.global.scan", "view.scan", ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_M, "Ctrl+Shift+M");
+        chord::mod_ctrl | chord::mod_alt | chord::k_d, "Ctrl+Alt+D");
+    register_global_shortcut(rt, "binding.global.scan", "view.scan", chord::mod_ctrl | chord::mod_shift | chord::k_m, "Ctrl+Shift+M");
 	register_widget_shortcut(rt, "binding.memory.first_scan", "memory.first_scan",
-		ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_F, "Ctrl+Alt+F", k_memory_scan_scope, 50);
+		chord::mod_ctrl | chord::mod_alt | chord::k_f, "Ctrl+Alt+F", k_memory_scan_scope, 50);
 	register_widget_shortcut(rt, "binding.memory.next_scan", "memory.next_scan",
-		ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_N, "Ctrl+Alt+N", k_memory_scan_scope, 50);
+		chord::mod_ctrl | chord::mod_alt | chord::k_n, "Ctrl+Alt+N", k_memory_scan_scope, 50);
 	register_widget_shortcut(rt, "binding.memory.stop_scan", "memory.stop_scan",
-		ImGuiMod_Shift | ImGuiKey_Escape, "Shift+Escape", k_memory_scan_scope, 50);
+		chord::mod_shift | chord::k_escape, "Shift+Escape", k_memory_scan_scope, 50);
 	register_widget_shortcut(rt, "binding.memory.undo_scan", "memory.undo_scan",
-		ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_Z, "Ctrl+Alt+Z", k_memory_scan_scope, 50);
+		chord::mod_ctrl | chord::mod_alt | chord::k_z, "Ctrl+Alt+Z", k_memory_scan_scope, 50);
 	register_widget_shortcut(rt, "binding.memory.new_scan", "memory.new_scan",
-		ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_R, "Ctrl+Alt+R", k_memory_scan_scope, 50);
-    register_global_shortcut(rt, "binding.global.binary_map", "view.binary_map", ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_B, "Ctrl+Shift+B");
-    register_global_shortcut(rt, "binding.global.command_palette", "view.command_palette", ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_P, "Ctrl+Shift+P");
-    register_global_shortcut(rt, "binding.global.new_chat", "ai.new_chat", ImGuiMod_Ctrl | ImGuiKey_L, "Ctrl+L");
-    register_global_shortcut(rt, "binding.global.workspace_search", "view.global_search", ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_F, "Ctrl+Shift+F");
-    register_global_shortcut(rt, "binding.global.preferences", "edit.preferences", ImGuiMod_Ctrl | ImGuiKey_Comma, "Ctrl+,");
+		chord::mod_ctrl | chord::mod_alt | chord::k_r, "Ctrl+Alt+R", k_memory_scan_scope, 50);
+    register_global_shortcut(rt, "binding.global.binary_map", "view.binary_map", chord::mod_ctrl | chord::mod_shift | chord::k_b, "Ctrl+Shift+B");
+    register_global_shortcut(rt, "binding.global.command_palette", "view.command_palette", chord::mod_ctrl | chord::mod_shift | chord::k_p, "Ctrl+Shift+P");
+    register_global_shortcut(rt, "binding.global.new_chat", "ai.new_chat", chord::mod_ctrl | chord::k_l, "Ctrl+L");
+    register_global_shortcut(rt, "binding.global.workspace_search", "view.global_search", chord::mod_ctrl | chord::mod_shift | chord::k_f, "Ctrl+Shift+F");
+    register_global_shortcut(rt, "binding.global.preferences", "edit.preferences", chord::mod_ctrl | chord::k_comma, "Ctrl+,");
     register_widget_shortcut(rt, "binding.ai.agent_picker", "ai.agent_picker.toggle",
-        ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_A, "Ctrl+Shift+A",
+        chord::mod_ctrl | chord::mod_shift | chord::k_a, "Ctrl+Shift+A",
         "scope.view.ai_chat", 50);
     register_widget_shortcut(rt, "binding.ai.agent_mode", "ai.agent_mode.toggle_plan_build",
-        ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_M, "Ctrl+Alt+M",
+        chord::mod_ctrl | chord::mod_alt | chord::k_m, "Ctrl+Alt+M",
         "scope.view.ai_chat", 50);
     register_global_chord(rt, "binding.global.keyboard_shortcuts", "help.shortcuts",
-        ImGuiMod_Ctrl | ImGuiKey_K, ImGuiMod_Ctrl | ImGuiKey_S,
+        chord::mod_ctrl | chord::k_k, chord::mod_ctrl | chord::k_s,
         "Ctrl+K, Ctrl+S");
-    register_global_shortcut(rt, "binding.global.xrefs", "view.focus.view.analysis.references", ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_X, "Ctrl+Shift+X");
-    register_global_shortcut(rt, "binding.global.deobfuscation", "view.focus.view.analysis.deobfuscation", ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_O, "Ctrl+Shift+O");
+    register_global_shortcut(rt, "binding.global.xrefs", "view.focus.view.analysis.references", chord::mod_ctrl | chord::mod_shift | chord::k_x, "Ctrl+Shift+X");
+    register_global_shortcut(rt, "binding.global.deobfuscation", "view.focus.view.analysis.deobfuscation", chord::mod_ctrl | chord::mod_shift | chord::k_o, "Ctrl+Shift+O");
     register_global_shortcut(rt, "binding.global.next_document_or_session",
-        "navigate.next_document_or_session", ImGuiMod_Ctrl | ImGuiKey_Tab, "Ctrl+Tab");
+        "navigate.next_document_or_session", chord::mod_ctrl | chord::k_tab, "Ctrl+Tab");
     register_global_shortcut(rt, "binding.global.previous_document_or_session",
         "navigate.previous_document_or_session",
-        ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_Tab, "Ctrl+Shift+Tab");
+        chord::mod_ctrl | chord::mod_shift | chord::k_tab, "Ctrl+Shift+Tab");
     register_global_shortcut(rt, "binding.global.programming_task_run", "programming.task.run",
-        ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_R, "Ctrl+Alt+R");
+        chord::mod_ctrl | chord::mod_alt | chord::k_r, "Ctrl+Alt+R");
     register_global_shortcut(rt, "binding.global.programming_task_cancel", "programming.task.cancel",
-        ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_C, "Ctrl+Alt+C");
+        chord::mod_ctrl | chord::mod_alt | chord::k_c, "Ctrl+Alt+C");
     register_global_shortcut(rt, "binding.global.programming_task_configure", "programming.task.configure",
-        ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_T, "Ctrl+Alt+T");
+        chord::mod_ctrl | chord::mod_alt | chord::k_t, "Ctrl+Alt+T");
     register_domain_shortcut(rt, "binding.output.copy_all", "output.copy_all",
-        ImGuiMod_Ctrl | ImGuiKey_C, "Ctrl+C", k_output_scope, 40);
+        chord::mod_ctrl | chord::k_c, "Ctrl+C", k_output_scope, 40);
     register_domain_shortcut(rt, "binding.output.select_all", "output.select_all",
-        ImGuiMod_Ctrl | ImGuiKey_A, "Ctrl+A", k_output_scope, 40);
+        chord::mod_ctrl | chord::k_a, "Ctrl+A", k_output_scope, 40);
     register_domain_shortcut(rt, "binding.output.filter", "output.filter",
-        ImGuiMod_Ctrl | ImGuiKey_F, "Ctrl+F", k_output_scope, 40);
+        chord::mod_ctrl | chord::k_f, "Ctrl+F", k_output_scope, 40);
     register_domain_shortcut(rt, "binding.terminal.new", "terminal.new",
-        ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_GraveAccent, "Ctrl+Shift+`", k_terminal_scope, 40);
+        chord::mod_ctrl | chord::mod_shift | chord::k_grave_accent, "Ctrl+Shift+`", k_terminal_scope, 40);
     register_domain_shortcut(rt, "binding.terminal.close", "terminal.close",
-        ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_W, "Ctrl+Shift+W", k_terminal_scope, 40);
+        chord::mod_ctrl | chord::mod_shift | chord::k_w, "Ctrl+Shift+W", k_terminal_scope, 40);
     register_domain_shortcut(rt, "binding.terminal.restart", "terminal.restart",
-        ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_R, "Ctrl+Shift+R", k_terminal_scope, 40);
+        chord::mod_ctrl | chord::mod_shift | chord::k_r, "Ctrl+Shift+R", k_terminal_scope, 40);
     register_domain_shortcut(rt, "binding.terminal.next", "terminal.next",
-        ImGuiMod_Ctrl | ImGuiKey_PageDown, "Ctrl+PageDown", k_terminal_scope, 40);
+        chord::mod_ctrl | chord::k_page_down, "Ctrl+PageDown", k_terminal_scope, 40);
     register_domain_shortcut(rt, "binding.terminal.previous", "terminal.previous",
-        ImGuiMod_Ctrl | ImGuiKey_PageUp, "Ctrl+PageUp", k_terminal_scope, 40);
+        chord::mod_ctrl | chord::k_page_up, "Ctrl+PageUp", k_terminal_scope, 40);
     register_domain_shortcut(rt, "binding.terminal.search", "terminal.search",
-        ImGuiMod_Ctrl | ImGuiKey_F, "Ctrl+F", k_terminal_scope, 40);
+        chord::mod_ctrl | chord::k_f, "Ctrl+F", k_terminal_scope, 40);
     register_domain_shortcut(rt, "binding.terminal.paste", "terminal.paste",
-        ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_V, "Ctrl+Shift+V", k_terminal_scope, 40);
+        chord::mod_ctrl | chord::mod_shift | chord::k_v, "Ctrl+Shift+V", k_terminal_scope, 40);
     register_domain_shortcut(rt, "binding.terminal.split_vertical", "terminal.split_vertical",
-        ImGuiMod_Alt | ImGuiMod_Shift | ImGuiKey_V, "Alt+Shift+V", k_terminal_scope, 40);
+        chord::mod_alt | chord::mod_shift | chord::k_v, "Alt+Shift+V", k_terminal_scope, 40);
     register_domain_shortcut(rt, "binding.terminal.split_horizontal", "terminal.split_horizontal",
-        ImGuiMod_Alt | ImGuiMod_Shift | ImGuiKey_H, "Alt+Shift+H", k_terminal_scope, 40);
+        chord::mod_alt | chord::mod_shift | chord::k_h, "Alt+Shift+H", k_terminal_scope, 40);
     register_domain_shortcut(rt, "binding.terminal.unsplit", "terminal.unsplit",
-        ImGuiMod_Alt | ImGuiMod_Shift | ImGuiKey_U, "Alt+Shift+U", k_terminal_scope, 40);
-	register_global_shortcut(rt, "binding.global.shell.maximize", "shell.toggle_maximize", ImGuiKey_F11, "F11");
+        chord::mod_alt | chord::mod_shift | chord::k_u, "Alt+Shift+U", k_terminal_scope, 40);
+	register_global_shortcut(rt, "binding.global.shell.maximize", "shell.toggle_maximize", chord::k_f11, "F11");
 	register_domain_shortcut(rt, "binding.analysis.decompile", "analysis.decompile_or_focus_pseudocode",
-		ImGuiKey_F5, "F5", k_analysis_scope, 20);
+		chord::k_f5, "F5", k_analysis_scope, 20);
     register_domain_shortcut(rt, "binding.analysis.toggle_graph_text", "analysis.toggle_graph_text",
-		ImGuiKey_Space, "Space", k_analysis_scope, 20);
+		chord::k_space, "Space", k_analysis_scope, 20);
     register_domain_shortcut(rt, "binding.analysis.back", "analysis.navigate.back",
-        ImGuiMod_Alt | ImGuiKey_LeftArrow, "Alt+Left", k_analysis_scope, 20);
+        chord::mod_alt | chord::k_left_arrow, "Alt+Left", k_analysis_scope, 20);
     register_domain_shortcut(rt, "binding.analysis.forward", "analysis.navigate.forward",
-        ImGuiMod_Alt | ImGuiKey_RightArrow, "Alt+Right", k_analysis_scope, 20);
+        chord::mod_alt | chord::k_right_arrow, "Alt+Right", k_analysis_scope, 20);
     register_domain_shortcut(rt, "binding.analysis.follow", "analysis.navigate.follow",
-        ImGuiKey_Enter, "Enter", k_analysis_scope, 20);
+        chord::k_enter, "Enter", k_analysis_scope, 20);
     register_domain_shortcut(rt, "binding.analysis.follow_keypad", "analysis.navigate.follow",
-        ImGuiKey_KeypadEnter, "Keypad Enter", k_analysis_scope, 20);
+        chord::k_keypad_enter, "Keypad Enter", k_analysis_scope, 20);
     register_domain_shortcut(rt, "binding.analysis.goto", "analysis.navigate.goto",
-		ImGuiKey_G, "G", k_analysis_scope, 20);
+		chord::k_g, "G", k_analysis_scope, 20);
     register_document_shortcut(rt, "binding.analysis.goto_ctrl", "analysis.navigate.goto",
-        ImGuiMod_Ctrl | ImGuiKey_G, "Ctrl+G", k_disassembly_scope, 30);
+        chord::mod_ctrl | chord::k_g, "Ctrl+G", k_disassembly_scope, 30);
     register_document_shortcut(rt, "binding.analysis.rebase", "analysis.modify.rebase",
-        ImGuiMod_Ctrl | ImGuiKey_R, "Ctrl+R", k_disassembly_scope, 30);
+        chord::mod_ctrl | chord::k_r, "Ctrl+R", k_disassembly_scope, 30);
     register_document_shortcut(rt, "binding.analysis.export_listing",
-        "analysis.export.listing", ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_D,
+        "analysis.export.listing", chord::mod_ctrl | chord::mod_shift | chord::k_d,
         "Ctrl+Shift+D", k_disassembly_scope, 30);
     register_domain_shortcut(rt, "binding.analysis.rename", "analysis.modify.rename",
-        ImGuiKey_N, "N", k_analysis_scope, 20);
+        chord::k_n, "N", k_analysis_scope, 20);
     register_domain_shortcut(rt, "binding.analysis.retype", "analysis.modify.retype",
-        ImGuiKey_Y, "Y", k_analysis_scope, 20);
+        chord::k_y, "Y", k_analysis_scope, 20);
     register_domain_shortcut(rt, "binding.analysis.xrefs", "analysis.navigate.xrefs",
-        ImGuiKey_X, "X", k_analysis_scope, 20);
+        chord::k_x, "X", k_analysis_scope, 20);
     register_domain_shortcut(rt, "binding.analysis.comment", "analysis.modify.comment",
-        ImGuiKey_Semicolon, ";", k_analysis_scope, 20);
+        chord::k_semicolon, ";", k_analysis_scope, 20);
     register_domain_shortcut(rt, "binding.analysis.bookmark", "analysis.modify.bookmark",
-        ImGuiKey_B, "B", k_analysis_scope, 20);
+        chord::k_b, "B", k_analysis_scope, 20);
     register_domain_shortcut(rt, "binding.analysis.overlay_undo", "analysis.overlay.undo",
-        ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_Z, "Ctrl+Alt+Z", k_analysis_scope, 20);
+        chord::mod_ctrl | chord::mod_alt | chord::k_z, "Ctrl+Alt+Z", k_analysis_scope, 20);
     register_domain_shortcut(rt, "binding.analysis.overlay_redo", "analysis.overlay.redo",
-        ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_Y, "Ctrl+Alt+Y", k_analysis_scope, 20);
+        chord::mod_ctrl | chord::mod_alt | chord::k_y, "Ctrl+Alt+Y", k_analysis_scope, 20);
     register_domain_shortcut(rt, "binding.analysis.run_to_cursor",
-        "analysis.debug.run_to_cursor", ImGuiKey_F4, "F4", k_analysis_scope, 20);
+        "analysis.debug.run_to_cursor", chord::k_f4, "F4", k_analysis_scope, 20);
     register_domain_shortcut(rt, "binding.analysis.toggle_breakpoint",
-        "analysis.debug.breakpoint", ImGuiKey_F9, "F9", k_analysis_scope, 20);
+        "analysis.debug.breakpoint", chord::k_f9, "F9", k_analysis_scope, 20);
     register_document_shortcut(rt, "binding.analysis.pseudocode_tab",
-        "analysis.decompile_or_focus_pseudocode", ImGuiKey_Tab, "Tab",
+        "analysis.decompile_or_focus_pseudocode", chord::k_tab, "Tab",
         k_disassembly_scope, 30);
     register_widget_shortcut(rt, "binding.analysis.proximity.drill",
-        "analysis.proximity.drill", ImGuiKey_Enter, "Enter",
+        "analysis.proximity.drill", chord::k_enter, "Enter",
         "scope.view.analysis.proximity", 40);
     register_widget_shortcut(rt, "binding.analysis.proximity.drill_keypad",
-        "analysis.proximity.drill", ImGuiKey_KeypadEnter, "Keypad Enter",
+        "analysis.proximity.drill", chord::k_keypad_enter, "Keypad Enter",
         "scope.view.analysis.proximity", 40);
-	register_domain_shortcut(rt, "binding.debugger.run", "debugger.run_continue", ImGuiKey_F9, "F9", k_debugger_scope, 30);
-	register_domain_shortcut(rt, "binding.debugger.step_over", "debugger.step_over", ImGuiKey_F8, "F8", k_debugger_scope, 30);
-	register_domain_shortcut(rt, "binding.debugger.step_into", "debugger.step_into", ImGuiKey_F7, "F7", k_debugger_scope, 30);
-	register_domain_shortcut(rt, "binding.debugger.step_out", "debugger.step_out", ImGuiMod_Shift | ImGuiKey_F11, "Shift+F11", k_debugger_scope, 30);
-	register_domain_shortcut(rt, "binding.debugger.stop", "debugger.stop", ImGuiMod_Shift | ImGuiKey_F5, "Shift+F5", k_debugger_scope, 30);
-	register_domain_shortcut(rt, "binding.debugger.restart", "debugger.restart", ImGuiMod_Ctrl | ImGuiMod_Shift | ImGuiKey_F5, "Ctrl+Shift+F5", k_debugger_scope, 30);
-	register_domain_shortcut(rt, "binding.debugger.detach", "debugger.detach", ImGuiMod_Ctrl | ImGuiKey_F2, "Ctrl+F2", k_debugger_scope, 30);
-	register_domain_shortcut(rt, "binding.debugger.toggle_breakpoint", "debugger.toggle_breakpoint_at_rip", ImGuiKey_F2, "F2", k_debugger_scope, 30);
+	register_domain_shortcut(rt, "binding.debugger.run", "debugger.run_continue", chord::k_f9, "F9", k_debugger_scope, 30);
+	register_domain_shortcut(rt, "binding.debugger.step_over", "debugger.step_over", chord::k_f8, "F8", k_debugger_scope, 30);
+	register_domain_shortcut(rt, "binding.debugger.step_into", "debugger.step_into", chord::k_f7, "F7", k_debugger_scope, 30);
+	register_domain_shortcut(rt, "binding.debugger.step_out", "debugger.step_out", chord::mod_shift | chord::k_f11, "Shift+F11", k_debugger_scope, 30);
+	register_domain_shortcut(rt, "binding.debugger.stop", "debugger.stop", chord::mod_shift | chord::k_f5, "Shift+F5", k_debugger_scope, 30);
+	register_domain_shortcut(rt, "binding.debugger.restart", "debugger.restart", chord::mod_ctrl | chord::mod_shift | chord::k_f5, "Ctrl+Shift+F5", k_debugger_scope, 30);
+	register_domain_shortcut(rt, "binding.debugger.detach", "debugger.detach", chord::mod_ctrl | chord::k_f2, "Ctrl+F2", k_debugger_scope, 30);
+	register_domain_shortcut(rt, "binding.debugger.toggle_breakpoint", "debugger.toggle_breakpoint_at_rip", chord::k_f2, "F2", k_debugger_scope, 30);
 	register_widget_shortcut(rt, "binding.debugger.watch.refresh_all",
-		"debugger.watch.refresh_all", ImGuiMod_Ctrl | ImGuiKey_R,
+		"debugger.watch.refresh_all", chord::mod_ctrl | chord::k_r,
 		"Ctrl+R", "scope.view.debug.watches", 50);
 	register_shortcut(rt, "binding.editor.source_breakpoint",
-		"debug.source.toggle_breakpoint", ImGuiKey_F9, "F9");
+		"debug.source.toggle_breakpoint", chord::k_f9, "F9");
 	register_widget_shortcut(rt, "binding.network.intercept.forward_selected",
-		"network.intercept.forward_selected", ImGuiKey_F, "F", k_network_intercept_scope, 50);
+		"network.intercept.forward_selected", chord::k_f, "F", k_network_intercept_scope, 50);
 	register_widget_shortcut(rt, "binding.network.intercept.drop_selected",
-		"network.intercept.drop_selected", ImGuiKey_D, "D", k_network_intercept_scope, 50);
+		"network.intercept.drop_selected", chord::k_d, "D", k_network_intercept_scope, 50);
 	register_widget_shortcut(rt, "binding.network.intercept.forward_modified",
-		"network.intercept.forward_modified", ImGuiKey_M, "M", k_network_intercept_scope, 50);
+		"network.intercept.forward_modified", chord::k_m, "M", k_network_intercept_scope, 50);
 	register_widget_shortcut(rt, "binding.network.intercept.forward_all",
-		"network.intercept.forward_all", ImGuiMod_Shift | ImGuiKey_F,
+		"network.intercept.forward_all", chord::mod_shift | chord::k_f,
 		"Shift+F", k_network_intercept_scope, 50);
 	register_widget_shortcut(rt, "binding.network.intercept.drop_all",
-		"network.intercept.drop_all", ImGuiMod_Shift | ImGuiKey_D,
+		"network.intercept.drop_all", chord::mod_shift | chord::k_d,
 		"Shift+D", k_network_intercept_scope, 50);
     struct retained_action_definition_t {
         const char* id;
@@ -5890,9 +6182,9 @@ void initialize(runtime_t& rt) {
             }, "category.retained_entity", definition.category);
     }
     register_document_shortcut(rt, "binding.analysis.patch_bytes", "analysis.modify.patch",
-        ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_P, "Ctrl+Alt+P", k_disassembly_scope, 30);
+        chord::mod_ctrl | chord::mod_alt | chord::k_p, "Ctrl+Alt+P", k_disassembly_scope, 30);
     register_document_shortcut(rt, "binding.analysis.patch_nop", "analysis.modify.nop",
-        ImGuiMod_Ctrl | ImGuiMod_Alt | ImGuiKey_N, "Ctrl+Alt+N", k_disassembly_scope, 30);
+        chord::mod_ctrl | chord::mod_alt | chord::k_n, "Ctrl+Alt+N", k_disassembly_scope, 30);
     for (const auto& definition : analysis_type_retained_actions) {
         const std::string retained_id = definition.id;
         register_action(rt, definition.id, definition.label, definition.description,
@@ -6694,11 +6986,11 @@ interaction_context_t active_context(runtime_t& rt) {
     context.active_view_instance = {};
     context.payload = {};
     context.text_input_active = false;
-    const auto focused = application_views::registry().focused_instance();
+    const auto focused = host_focused_instance();
     if (focused) {
         context.active_view = focused->view;
         context.active_view_instance = focused->instance;
-        const auto* descriptor = application_views::registry().find_descriptor(focused->view);
+        const auto descriptor = host_find_view(focused->view);
         if (descriptor && descriptor->category == view_category_t::document)
             context.focus_path.push_back({stable_scope_id_t(
                 std::string("scope.") + focused->view.value()), focus_scope_kind_t::document});
@@ -6715,6 +7007,23 @@ interaction_context_t active_context(runtime_t& rt) {
                  descriptor->category == view_category_t::document))
             context.focus_path.push_back({stable_scope_id_t(k_analysis_scope), focus_scope_kind_t::domain});
     }
+    return context;
+}
+
+interaction_context_t assemble_current_context(runtime_t& rt) {
+    if (rt.context_source) {
+        auto context = rt.context_source();
+        if (rt.editor_focused) {
+            auto editor = editor_context(rt);
+            editor.modal_active = context.modal_active;
+            context = std::move(editor);
+        }
+        context.generation = rt.generation;
+        return context;
+    }
+    auto context = active_context(rt);
+    if (rt.text_input_focus_active)
+        context.text_input_active = true;
     return context;
 }
 
@@ -6769,25 +7078,23 @@ void cancel_action_confirmation(runtime_t& rt) {
         if (cleanup)
             cleanup();
     } catch (const std::exception& exception) {
-        design::notification_t diagnostic;
-        diagnostic.stable_id = "diagnostic.ui.confirmation.cleanup";
+        task_center::diagnostic_registration_t diagnostic;
+        diagnostic.id = "diagnostic.ui.confirmation.cleanup";
         diagnostic.owner = "application.ui";
-        diagnostic.target = pending_id.c_str();
+        diagnostic.target = pending_id;
         diagnostic.summary = "Action confirmation cleanup failed";
         diagnostic.details = exception.what();
-        diagnostic.semantic = design::semantic_t::error;
-        diagnostic.attention_required = true;
-        static_cast<void>(design::publish_notification(std::move(diagnostic)));
+        diagnostic.severity = task_center::diagnostic_severity_t::error;
+        static_cast<void>(task_center::raise_diagnostic(std::move(diagnostic)));
     } catch (...) {
-        design::notification_t diagnostic;
-        diagnostic.stable_id = "diagnostic.ui.confirmation.cleanup";
+        task_center::diagnostic_registration_t diagnostic;
+        diagnostic.id = "diagnostic.ui.confirmation.cleanup";
         diagnostic.owner = "application.ui";
-        diagnostic.target = pending_id.c_str();
+        diagnostic.target = pending_id;
         diagnostic.summary = "Action confirmation cleanup failed";
         diagnostic.details = "The cleanup callback raised an unknown exception";
-        diagnostic.semantic = design::semantic_t::error;
-        diagnostic.attention_required = true;
-        static_cast<void>(design::publish_notification(std::move(diagnostic)));
+        diagnostic.severity = task_center::diagnostic_severity_t::error;
+        static_cast<void>(task_center::raise_diagnostic(std::move(diagnostic)));
     }
 }
 
@@ -6814,147 +7121,162 @@ void configure_shell_callbacks(shell_callbacks_t callbacks) {
 void begin_frame() {
     auto& rt = runtime();
     initialize(rt);
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    aida::infra::executor::drain_preview_frame();
-#endif
     aida::editor::language_service::begin_frame();
 	source_debug_service::begin_frame();
 	if (rt.shell.exit_application && file_tabs::consume_exit_review_ready())
 		rt.shell.exit_application();
-    rt.consumed_strokes_this_frame.clear();
 	rt.previous_editor_focused = rt.editor_focused;
 	rt.previous_editor_text_input = rt.editor_text_input;
 	rt.editor_focused = false;
 	rt.editor_text_input = false;
 	rt.editor_focus_observed_this_frame = false;
     rt.editor.focused = rt.editor_focused;
-    rt.current = active_context(rt);
+    rt.current = assemble_current_context(rt);
 }
 
-void render_action_confirmation() {
+void configure_shell_host_services(shell_host_services_t services) {
+    auto& rt = runtime();
+    rt.host = std::move(services);
+    initialize(rt);
+    install_catalog_view_actions(rt);
+    retry_deferred_shortcut_bindings(rt);
+}
+
+void set_text_input_focus_active(bool active) noexcept {
+    auto& rt = runtime();
+    rt.text_input_focus_active = active;
+}
+
+std::optional<pending_action_confirmation_view_t> pending_action_confirmation() {
     auto& rt = runtime();
     initialize(rt);
     if (!rt.pending_confirmation.active)
-        return;
-    constexpr const char* popup_label =
-        "Confirm Action###aida_global_action_confirmation";
-    if (rt.pending_confirmation.open_requested) {
-        design::open_dialog("aida_global_action_confirmation", "Confirm Action");
-        rt.pending_confirmation.open_requested = false;
-    }
-    bool keep_open = true;
-    if (design::begin_dialog_exact(popup_label, ImVec2(560.0f, 350.0f),
-            ImVec2(420.0f, 280.0f), &keep_open)) {
-        const std::string pending_id = rt.pending_confirmation.action;
-        const auto pending_source = rt.pending_confirmation.source;
-        const interaction_context_t pending_context = rt.pending_confirmation.context;
-        const auto state = rt.actions.evaluate(
-            action_id(pending_id.c_str()), pending_context);
-        const auto* descriptor = rt.actions.find(action_id(pending_id.c_str()));
+        return std::nullopt;
+    pending_action_confirmation_view_t view;
+    view.action = rt.pending_confirmation.action;
+    view.label = rt.pending_confirmation.label;
+    view.description = rt.pending_confirmation.description;
+    view.consequence = rt.pending_confirmation.consequence;
+    view.source = rt.pending_confirmation.source;
+    view.presentation_pending = rt.pending_confirmation.open_requested;
+    const auto* descriptor = rt.actions.find(action_id(view.action.c_str()));
+    view.action_registered = descriptor != nullptr;
+    if (descriptor) {
+        const auto state = rt.actions.evaluate(descriptor->id,
+            rt.pending_confirmation.context);
+        view.capability = state.capability;
         const action_effect_t high_consequence_effects =
             action_effect_t::destructive | action_effect_t::security_sensitive |
             action_effect_t::live_process | action_effect_t::file_system |
             action_effect_t::network_activity | action_effect_t::memory_mutation |
             action_effect_t::debugger_execution;
-        const bool high_consequence = descriptor &&
+        view.high_consequence =
             any(descriptor->consequence.effects & high_consequence_effects);
-        const float footer_height = design::dialog_footer_reserve_height(
-            "Confirm", "Cancel");
-        design::begin_dialog_body("aida_global_action_confirmation_body",
-            footer_height);
-        design::text(design::text_role_t::title,
-            rt.pending_confirmation.label.c_str());
-        if (!rt.pending_confirmation.description.empty())
-            ImGui::TextWrapped("%s", rt.pending_confirmation.description.c_str());
-        if (!rt.pending_confirmation.consequence.empty()) {
-            ImGui::Spacing();
-            ImGui::TextWrapped("Consequence: %s", rt.pending_confirmation.consequence.c_str());
-        }
-        if (!state.capability.enabled && !state.capability.disabled_reason.empty())
-            ImGui::TextWrapped("Unavailable: %s", state.capability.disabled_reason.c_str());
-        design::end_dialog_body();
-        const auto dialog_result = design::dialog_footer(
-            "aida_global_action_confirmation_footer", "Confirm",
-            state.capability.enabled, high_consequence);
-        if (!descriptor || !state.capability.enabled) {
-            action_execution_result_t unavailable;
-            unavailable.status = action_execution_status_t::unavailable;
-            unavailable.action = action_id(pending_id.c_str());
-            unavailable.message = !descriptor ? "The retained action is no longer registered"
-                : state.capability.disabled_reason.empty()
-                    ? "The retained action became unavailable before confirmation"
-                    : state.capability.disabled_reason;
-            cancel_action_confirmation(rt);
-            ImGui::CloseCurrentPopup();
-            publish_action_execution_failure(pending_id.c_str(), unavailable,
-                pending_source);
-        } else if (dialog_result.confirmed) {
-            action_invocation_t invocation{pending_context};
-            invocation.source = pending_source;
-            invocation.invocation_id = rt.invocation++;
-            invocation.review_completed = true;
-            invocation.confirmation_granted = true;
-            const auto result = rt.actions.execute(
-                action_id(pending_id.c_str()), invocation);
-            if (result.executed())
-                rt.pending_confirmation = {};
-            else
-                cancel_action_confirmation(rt);
-            ImGui::CloseCurrentPopup();
-            publish_action_execution_failure(pending_id.c_str(), result,
-                pending_source);
-        } else if (dialog_result.cancelled) {
-            cancel_action_confirmation(rt);
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
+    } else {
+        view.capability = capability_state_t::unavailable(
+            "The retained action is no longer registered", false);
     }
-    if (!keep_open)
-        cancel_action_confirmation(rt);
-    else if (rt.pending_confirmation.active &&
-             !ImGui::IsPopupOpen(popup_label))
-        cancel_action_confirmation(rt);
+    return view;
 }
 
-void process_global_shortcuts() {
+void acknowledge_pending_action_presentation() noexcept {
+    auto& rt = runtime();
+    if (rt.pending_confirmation.active)
+        rt.pending_confirmation.open_requested = false;
+}
+
+action_execution_result_t confirm_pending_action() {
     auto& rt = runtime();
     initialize(rt);
-    rt.current = active_context(rt);
+    action_execution_result_t result;
+    if (!rt.pending_confirmation.active) {
+        result.status = action_execution_status_t::unavailable;
+        result.message = "No action confirmation is pending";
+        return result;
+    }
+    const std::string pending_id = rt.pending_confirmation.action;
+    const auto pending_source = rt.pending_confirmation.source;
+    const interaction_context_t pending_context = rt.pending_confirmation.context;
+    action_invocation_t invocation{pending_context};
+    invocation.source = pending_source;
+    invocation.invocation_id = rt.invocation++;
+    invocation.review_completed = true;
+    invocation.confirmation_granted = true;
+    result = rt.actions.execute(action_id(pending_id.c_str()), invocation);
+    if (result.executed())
+        rt.pending_confirmation = {};
+    else
+        cancel_action_confirmation(rt);
+    publish_action_execution_failure(pending_id.c_str(), result, pending_source);
+    return result;
+}
+
+void cancel_pending_action() {
+    auto& rt = runtime();
+    initialize(rt);
+    cancel_action_confirmation(rt);
+}
+
+void cancel_pending_action_unavailable() {
+    auto& rt = runtime();
+    initialize(rt);
+    if (!rt.pending_confirmation.active)
+        return;
+    const std::string pending_id = rt.pending_confirmation.action;
+    const auto pending_source = rt.pending_confirmation.source;
+    const auto* descriptor = rt.actions.find(action_id(pending_id.c_str()));
+    action_execution_result_t unavailable;
+    unavailable.status = action_execution_status_t::unavailable;
+    unavailable.action = action_id(pending_id.c_str());
+    if (!descriptor) {
+        unavailable.message = "The retained action is no longer registered";
+    } else {
+        const auto state = rt.actions.evaluate(descriptor->id,
+            rt.pending_confirmation.context);
+        unavailable.message = state.capability.disabled_reason.empty()
+            ? "The retained action became unavailable before confirmation"
+            : state.capability.disabled_reason;
+    }
+    cancel_action_confirmation(rt);
+    publish_action_execution_failure(pending_id.c_str(), unavailable,
+        pending_source);
+}
+
+shortcut_resolution_t probe_shortcut_stroke(chord_stroke_t stroke, bool repeated) {
+    auto& rt = runtime();
+    initialize(rt);
+    if (rt.shortcut_capture_active)
+        return {};
+    shortcut_resolver_t clone = rt.shortcuts;
+    const auto context = assemble_current_context(rt);
+    return clone.feed(stroke, repeated, now_ms(), context, rt.actions);
+}
+
+shortcut_resolution_t feed_shortcut_stroke(chord_stroke_t stroke, bool repeated) {
+    auto& rt = runtime();
+    initialize(rt);
     if (rt.shortcut_capture_active) {
         rt.shortcuts.cancel_pending();
-        return;
+        return {};
     }
-    if (globals::ui::command_palette_open) {
+    rt.current = assemble_current_context(rt);
+    const auto resolution = rt.shortcuts.feed(
+        stroke, repeated, now_ms(), rt.current, rt.actions);
+    execute_resolution(rt, resolution);
+    return resolution;
+}
+
+shortcut_resolution_t poll_shortcut_resolver() {
+    auto& rt = runtime();
+    initialize(rt);
+    if (rt.shortcut_capture_active) {
         rt.shortcuts.cancel_pending();
-        return;
+        return {};
     }
-    if (ImGui::IsPopupOpen(nullptr,
-            ImGuiPopupFlags_AnyPopupId | ImGuiPopupFlags_AnyPopupLevel)) {
-        rt.shortcuts.cancel_pending();
-        return;
-    }
-    if (ImGui::GetIO().WantTextInput)
-        return;
-    const auto& io = ImGui::GetIO();
-    for (int value = ImGuiKey_Tab; value < ImGuiKey_GamepadStart; ++value) {
-        const auto key = static_cast<ImGuiKey>(value);
-        if (!ImGui::IsKeyPressed(key, false))
-            continue;
-        ImGuiKeyChord stroke = key;
-        if (io.KeyCtrl) stroke |= ImGuiMod_Ctrl;
-        if (io.KeyShift) stroke |= ImGuiMod_Shift;
-        if (io.KeyAlt) stroke |= ImGuiMod_Alt;
-        if (io.KeySuper) stroke |= ImGuiMod_Super;
-        if (std::find(rt.consumed_strokes_this_frame.begin(),
-                      rt.consumed_strokes_this_frame.end(), stroke) !=
-            rt.consumed_strokes_this_frame.end())
-            continue;
-        const auto resolution = rt.shortcuts.feed(
-            stroke, false, now_ms(), rt.current, rt.actions);
-        if (execute_resolution(rt, resolution))
-            rt.consumed_strokes_this_frame.push_back(stroke);
-    }
-    execute_resolution(rt, rt.shortcuts.poll(now_ms(), rt.current, rt.actions));
+    rt.current = assemble_current_context(rt);
+    const auto resolution = rt.shortcuts.poll(now_ms(), rt.current, rt.actions);
+    execute_resolution(rt, resolution);
+    return resolution;
 }
 
 void set_editor_focus(bool focused, bool text_input_active, bool review_mode) {
@@ -6972,37 +7294,6 @@ void set_editor_focus(bool focused, bool text_input_active, bool review_mode) {
     rt.current = editor_context(rt);
 }
 
-void process_editor_shortcuts() {
-    auto& rt = runtime();
-    initialize(rt);
-    rt.current = editor_context(rt);
-    if (rt.shortcut_capture_active) {
-        rt.shortcuts.cancel_pending();
-        return;
-    }
-    const auto& io = ImGui::GetIO();
-    for (int value = ImGuiKey_Tab; value < ImGuiKey_GamepadStart; ++value) {
-        const auto key = static_cast<ImGuiKey>(value);
-        const bool pressed = ImGui::IsKeyPressed(key, true);
-        if (!pressed)
-            continue;
-        ImGuiKeyChord stroke = key;
-        if (io.KeyCtrl) stroke |= ImGuiMod_Ctrl;
-        if (io.KeyShift) stroke |= ImGuiMod_Shift;
-        if (io.KeyAlt) stroke |= ImGuiMod_Alt;
-        if (io.KeySuper) stroke |= ImGuiMod_Super;
-        if (std::find(rt.consumed_strokes_this_frame.begin(),
-                      rt.consumed_strokes_this_frame.end(), stroke) !=
-            rt.consumed_strokes_this_frame.end())
-            continue;
-        const auto resolution = rt.shortcuts.feed(stroke,
-            pressed && !ImGui::IsKeyPressed(key, false), now_ms(), rt.current, rt.actions);
-        if (execute_resolution(rt, resolution))
-            rt.consumed_strokes_this_frame.push_back(stroke);
-    }
-    execute_resolution(rt, rt.shortcuts.poll(now_ms(), rt.current, rt.actions));
-}
-
 void set_shortcut_capture_active(bool active) noexcept {
     auto& rt = runtime();
     initialize(rt);
@@ -7011,10 +7302,89 @@ void set_shortcut_capture_active(bool active) noexcept {
         rt.shortcuts.cancel_pending();
 }
 
+application_action_registry_t& action_registry() noexcept {
+    auto& rt = runtime();
+    initialize(rt);
+    return rt.actions;
+}
+
+shortcut_resolver_t& shortcut_resolver() noexcept {
+    auto& rt = runtime();
+    initialize(rt);
+    return rt.shortcuts;
+}
+
+context_menu_catalog_t& context_menu_catalog() noexcept {
+    auto& rt = runtime();
+    initialize(rt);
+    return rt.menus;
+}
+
+std::uint64_t allocate_invocation_id() noexcept {
+    auto& rt = runtime();
+    initialize(rt);
+    return ++rt.invocation;
+}
+
+std::uint64_t interaction_generation() noexcept {
+    return runtime().generation;
+}
+
+void bump_interaction_generation() noexcept {
+    ++runtime().generation;
+}
+
+void set_interaction_context_source(std::function<interaction_context_t()> fn) {
+    runtime().context_source = std::move(fn);
+}
+
+void set_command_palette_toggle_hook(std::function<void()> hook) {
+    runtime().command_palette_toggle_hook = std::move(hook);
+}
+
+interaction_context_t current_interaction_context() {
+    auto& rt = runtime();
+    initialize(rt);
+    rt.current = assemble_current_context(rt);
+    return rt.current;
+}
+
+interaction_context_t make_retained_entity_context(
+    const retained_entity_context_t& context) {
+    auto& rt = runtime();
+    initialize(rt);
+    rt.retained_entity = {};
+    rt.retained_entity.retained = context;
+    interaction_context_t result;
+    result.active_view = rt.retained_entity.retained.active_view;
+    if (!result.active_view.empty()) {
+        const auto descriptor = host_find_view(result.active_view);
+        if (descriptor && descriptor->category == view_category_t::document)
+            result.focus_path.push_back({stable_scope_id_t(
+                std::string("scope.") + result.active_view.value()),
+                focus_scope_kind_t::document});
+        else
+            result.focus_path.push_back({stable_scope_id_t(
+                std::string("scope.") + result.active_view.value()),
+                focus_scope_kind_t::widget});
+        if (descriptor && descriptor->category == view_category_t::debugger)
+            result.focus_path.push_back({
+                stable_scope_id_t(k_debugger_scope), focus_scope_kind_t::domain});
+        else if (descriptor && (descriptor->category == view_category_t::analysis ||
+                 descriptor->category == view_category_t::document))
+            result.focus_path.push_back({
+                stable_scope_id_t(k_analysis_scope), focus_scope_kind_t::domain});
+    }
+    result.payload = typed_context_ref_t::from(
+        context_type(k_retained_entity_context_type), rt.retained_entity);
+    result.generation = ++rt.generation;
+    return result;
+}
+
 action_presentation_t present_action(const char* id) {
     auto& rt = runtime();
     initialize(rt);
-    rt.current = active_context(rt);
+    rt.current = assemble_current_context(rt);
     action_presentation_t result;
     const auto* descriptor = rt.actions.find(action_id(id));
     if (!descriptor)
@@ -7085,7 +7455,7 @@ action_presentation_t present_retained_entity_action(
 capability_state_t action_capability(const char* id) {
     auto& rt = runtime();
     initialize(rt);
-    rt.current = active_context(rt);
+    rt.current = assemble_current_context(rt);
     const auto* descriptor = rt.actions.find(action_id(id));
     if (!descriptor)
         return capability_state_t::unavailable("The action is not registered", false);
@@ -7095,7 +7465,7 @@ capability_state_t action_capability(const char* id) {
 std::vector<action_presentation_t> list_actions(action_surface_t surface) {
     auto& rt = runtime();
     initialize(rt);
-    rt.current = active_context(rt);
+    rt.current = assemble_current_context(rt);
     std::vector<action_presentation_t> result;
     result.reserve(rt.actions.size());
     rt.actions.for_each([&](const application_action_descriptor_t& descriptor) {
@@ -7126,7 +7496,7 @@ std::vector<action_presentation_t> list_actions(action_surface_t surface) {
 std::vector<shortcut_presentation_t> list_shortcuts() {
     auto& rt = runtime();
     initialize(rt);
-    rt.current = active_context(rt);
+    rt.current = assemble_current_context(rt);
     const auto conflicts = rt.shortcuts.conflicts();
     auto has_conflict = [&](const stable_action_binding_id_t& id) {
         return std::any_of(conflicts.begin(), conflicts.end(), [&](const shortcut_conflict_t& conflict) {
@@ -7182,12 +7552,12 @@ std::vector<shortcut_presentation_t> list_shortcuts() {
     return result;
 }
 
-std::string format_shortcut_sequence(const std::vector<ImGuiKeyChord>& strokes) {
+std::string format_shortcut_sequence(const std::vector<chord_stroke_t>& strokes) {
     return format_strokes(strokes);
 }
 
 shortcut_edit_result_t update_shortcut_override(const char* binding_id,
-    const std::vector<ImGuiKeyChord>& strokes, bool replace_conflicts) {
+    const std::vector<chord_stroke_t>& strokes, bool replace_conflicts) {
     auto& rt = runtime();
     initialize(rt);
     const stable_action_binding_id_t id(binding_id ? binding_id : "");
@@ -7349,16 +7719,17 @@ void publish_action_execution_failure(const char* id,
     details.append(id && *id ? id : "<unknown>")
         .append("' from ").append(source_name).append(" did not execute: ")
         .append(message);
-    design::notification_t diagnostic;
-    diagnostic.stable_id = diagnostic_id.c_str();
+    task_center::diagnostic_registration_t diagnostic;
+    diagnostic.id = diagnostic_id;
     diagnostic.owner = "application.ui";
     diagnostic.target = id && *id ? id : "unknown";
-    diagnostic.summary = message.c_str();
-    diagnostic.details = details.c_str();
-    diagnostic.semantic = design::semantic_t::error;
-    diagnostic.attention_required = true;
-    static_cast<void>(design::publish_notification(std::move(diagnostic)));
-    toast_notification::push(message, toast_notification::toast_type_t::error, 5.0f);
+    diagnostic.summary = message;
+    diagnostic.details = details;
+    diagnostic.severity = task_center::diagnostic_severity_t::error;
+    static_cast<void>(task_center::raise_diagnostic(std::move(diagnostic)));
+    const auto& host = runtime().host;
+    if (host.show_error_toast)
+        host.show_error_toast(message, 5.0);
 }
 
 void finalize_action_execution(const char* id,
@@ -7374,7 +7745,7 @@ void finalize_action_execution(const char* id,
 action_execution_result_t execute_action(const char* id, action_invocation_source_t source) {
     auto& rt = runtime();
     initialize(rt);
-    rt.current = active_context(rt);
+    rt.current = assemble_current_context(rt);
     action_invocation_t invocation{rt.current};
     invocation.source = source;
     invocation.invocation_id = rt.invocation++;
@@ -7483,13 +7854,6 @@ void open_editor_context_menu(context_menu_open_origin_t origin) {
     rt.editor_popup_request = {stable_menu_id_t(rt.editor_review_mode
         ? "menu.editor.review" : "menu.editor.text"), origin,
         rt.editor_popup_context.generation};
-    ImGui::OpenPopup("##aida_editor_context");
-}
-
-void render_editor_context_menu() {
-    auto& rt = runtime();
-    context_menu_presenter_t presenter(rt.menus, rt.actions, &rt.shortcuts);
-    render_context_menu_popup("##aida_editor_context", presenter, rt.editor_popup_request, rt.editor_popup_context);
 }
 
 void open_editor_tab_context_menu(int tab_index, context_menu_open_origin_t origin) {
@@ -7505,18 +7869,6 @@ void open_editor_tab_context_menu(int tab_index, context_menu_open_origin_t orig
     rt.tab_popup_context.payload = typed_context_ref_t::from(context_type(k_tab_context_type), rt.tab);
     rt.tab_popup_context.generation = rt.generation;
     rt.tab_popup_request = {stable_menu_id_t("menu.editor.tab"), origin, rt.generation};
-    ImGui::OpenPopup("##aida_editor_tab_context");
-}
-
-void render_editor_tab_context_menu() {
-    auto& rt = runtime();
-    if (ImGui::IsPopupOpen("##aida_editor_tab_context") &&
-        (!file_tabs::is_valid_tab_index(rt.tab.index) ||
-         file_tabs::tabs[file_tabs::tab_index(rt.tab.index)].filepath != rt.tab.path ||
-         file_tabs::tabs[file_tabs::tab_index(rt.tab.index)].filename != rt.tab.name))
-        rt.tab_popup_context.generation = ++rt.generation;
-    context_menu_presenter_t presenter(rt.menus, rt.actions, &rt.shortcuts);
-    render_context_menu_popup("##aida_editor_tab_context", presenter, rt.tab_popup_request, rt.tab_popup_context);
 }
 
 void open_explorer_context_menu(int entry_index, context_menu_open_origin_t origin) {
@@ -7561,7 +7913,6 @@ void open_explorer_context_menu(int entry_index, context_menu_open_origin_t orig
     rt.explorer_popup_context.payload = typed_context_ref_t::from(context_type(k_explorer_entry_context_type), rt.explorer);
     rt.explorer_popup_context.generation = rt.generation;
     rt.explorer_popup_request = {stable_menu_id_t("menu.explorer.entry"), origin, rt.generation};
-    ImGui::OpenPopup("##aida_explorer_context");
 }
 
 void open_explorer_empty_context_menu(context_menu_open_origin_t origin) {
@@ -7574,17 +7925,6 @@ void open_explorer_empty_context_menu(context_menu_open_origin_t origin) {
     rt.explorer_popup_context.payload = typed_context_ref_t::from(context_type(k_explorer_empty_context_type), rt.explorer);
     rt.explorer_popup_context.generation = rt.generation;
     rt.explorer_popup_request = {stable_menu_id_t("menu.explorer.empty"), origin, rt.generation};
-    ImGui::OpenPopup("##aida_explorer_context");
-}
-
-void render_explorer_context_menu() {
-    auto& rt = runtime();
-    if (ImGui::IsPopupOpen("##aida_explorer_context") && rt.explorer.index >= 0 &&
-        (static_cast<std::size_t>(rt.explorer.index) >= file_browser::entries.size() ||
-         file_browser::entries[static_cast<std::size_t>(rt.explorer.index)].full_path != rt.explorer.path))
-        rt.explorer_popup_context.generation = ++rt.generation;
-    context_menu_presenter_t presenter(rt.menus, rt.actions, &rt.shortcuts);
-    render_context_menu_popup("##aida_explorer_context", presenter, rt.explorer_popup_request, rt.explorer_popup_context);
 }
 
 void open_workspace_search_context_menu(int result_index, context_menu_open_origin_t origin) {
@@ -7601,22 +7941,6 @@ void open_workspace_search_context_menu(int result_index, context_menu_open_orig
     rt.workspace_search_popup_context.payload = typed_context_ref_t::from(context_type(k_workspace_search_context_type), rt.workspace_search);
     rt.workspace_search_popup_context.generation = rt.generation;
     rt.workspace_search_popup_request = {stable_menu_id_t("menu.workspace_search.result"), origin, rt.generation};
-    ImGui::OpenPopup("##aida_workspace_search_context");
-}
-
-void render_workspace_search_context_menu() {
-    auto& rt = runtime();
-    if (ImGui::IsPopupOpen("##aida_workspace_search_context")) {
-        std::lock_guard<std::mutex> lock(workspace_search::g_search.results_mtx);
-        const bool valid = rt.workspace_search.index >= 0 &&
-            static_cast<std::size_t>(rt.workspace_search.index) < workspace_search::g_search.results.size();
-        if (!valid || workspace_search::g_search.results[static_cast<std::size_t>(rt.workspace_search.index)].filepath != rt.workspace_search.path ||
-            workspace_search::g_search.results[static_cast<std::size_t>(rt.workspace_search.index)].line_number != rt.workspace_search.line)
-            rt.workspace_search_popup_context.generation = ++rt.generation;
-    }
-    context_menu_presenter_t presenter(rt.menus, rt.actions, &rt.shortcuts);
-    render_context_menu_popup("##aida_workspace_search_context", presenter,
-        rt.workspace_search_popup_request, rt.workspace_search_popup_context);
 }
 
 void open_programming_result_context_menu(
@@ -7644,18 +7968,6 @@ void open_programming_result_context_menu(
     rt.programming_result_popup_context.generation = rt.generation;
     rt.programming_result_popup_request = {
         stable_menu_id_t("menu.programming.language.result"), origin, rt.generation};
-    ImGui::OpenPopup("##aida_programming_language_result_context");
-}
-
-void render_programming_result_context_menu() {
-    auto& rt = runtime();
-    if (ImGui::IsPopupOpen("##aida_programming_language_result_context") &&
-        !programming_result_capability(rt.programming_result).enabled)
-        rt.programming_result_popup_context.generation = ++rt.generation;
-    context_menu_presenter_t presenter(rt.menus, rt.actions, &rt.shortcuts);
-    render_context_menu_popup("##aida_programming_language_result_context",
-        presenter, rt.programming_result_popup_request,
-        rt.programming_result_popup_context);
 }
 
 void open_recent_context_menu(const std::string& path, bool open_session,
@@ -7671,26 +7983,18 @@ void open_recent_context_menu(const std::string& path, bool open_session,
     rt.recent_popup_context.payload = typed_context_ref_t::from(context_type(k_recent_context_type), rt.recent);
     rt.recent_popup_context.generation = rt.generation;
     rt.recent_popup_request = {stable_menu_id_t("menu.recent.item"), origin, rt.generation};
-    ImGui::OpenPopup("##aida_recent_context");
-}
-
-void render_recent_context_menu() {
-    auto& rt = runtime();
-    context_menu_presenter_t presenter(rt.menus, rt.actions, &rt.shortcuts);
-    render_context_menu_popup("##aida_recent_context", presenter,
-        rt.recent_popup_request, rt.recent_popup_context);
 }
 
 void open_view_surface_context_menu(const view_instance_id_t& instance,
                                     context_menu_open_origin_t origin) {
     auto& rt = runtime();
     initialize(rt);
-    const auto* descriptor = application_views::registry().find_descriptor(instance.view);
-    if (!descriptor || !application_views::registry().is_open(instance) ||
-        descriptor->render_ownership != view_render_ownership_t::registry_window)
+    const auto descriptor = host_find_view(instance.view);
+    if (!descriptor || !descriptor->registry_surface ||
+        !host_is_instance_open(instance))
         return;
     ++rt.generation;
-    rt.view_surface = {instance, application_views::registry().window_name(instance)};
+    rt.view_surface = {instance, host_window_name(instance)};
     rt.view_surface_popup_context = {};
     rt.view_surface_popup_context.active_view = instance.view;
     rt.view_surface_popup_context.active_view_instance = instance.instance;
@@ -7699,21 +8003,6 @@ void open_view_surface_context_menu(const view_instance_id_t& instance,
     rt.view_surface_popup_context.generation = rt.generation;
     rt.view_surface_popup_request = {
         stable_menu_id_t("menu.view.surface"), origin, rt.generation};
-    ImGui::OpenPopup("##aida_view_surface_context");
-}
-
-void render_view_surface_context_menu(const view_instance_id_t& instance) {
-    auto& rt = runtime();
-    if (!(rt.view_surface.instance == instance))
-        return;
-    if (ImGui::IsPopupOpen("##aida_view_surface_context")) {
-        if (!application_views::registry().is_open(instance) ||
-            application_views::registry().window_name(instance) != rt.view_surface.window_name)
-            rt.view_surface_popup_context.generation = ++rt.generation;
-    }
-    context_menu_presenter_t presenter(rt.menus, rt.actions, &rt.shortcuts);
-    render_context_menu_popup("##aida_view_surface_context", presenter,
-        rt.view_surface_popup_request, rt.view_surface_popup_context);
 }
 
 action_presentation_t present_output_action(int tab, const char* action) {
@@ -7798,14 +8087,6 @@ void open_output_context_menu(int tab, context_menu_open_origin_t origin) {
     rt.output_popup_context.payload = typed_context_ref_t::from(context_type(k_output_context_type), rt.output);
     rt.output_popup_context.generation = ++rt.generation;
     rt.output_popup_request = {stable_menu_id_t("menu.output.view"), origin, rt.generation};
-    ImGui::OpenPopup("##aida_output_context");
-}
-
-void render_output_context_menu() {
-    auto& rt = runtime();
-    context_menu_presenter_t presenter(rt.menus, rt.actions, &rt.shortcuts);
-    render_context_menu_popup("##aida_output_context", presenter,
-        rt.output_popup_request, rt.output_popup_context);
 }
 
 void open_retained_entity_context_menu(retained_entity_context_t context,
@@ -7820,7 +8101,7 @@ void open_retained_entity_context_menu(retained_entity_context_t context,
     rt.retained_entity_popup_context.active_view =
         rt.retained_entity.retained.active_view;
     if (!rt.retained_entity_popup_context.active_view.empty()) {
-        const auto* descriptor = application_views::registry().find_descriptor(
+        const auto descriptor = host_find_view(
             rt.retained_entity_popup_context.active_view);
         if (descriptor && descriptor->category == view_category_t::document)
             rt.retained_entity_popup_context.focus_path.push_back({stable_scope_id_t(
@@ -7846,16 +8127,6 @@ void open_retained_entity_context_menu(retained_entity_context_t context,
             ? stable_menu_id_t("menu.retained.entity")
             : rt.retained_entity.retained.menu,
         origin, rt.generation};
-    ImGui::OpenPopup("##aida_retained_entity_context");
-}
-
-void render_retained_entity_context_menu(const char* owner_id) {
-    auto& rt = runtime();
-    if (!owner_id || rt.retained_entity.retained.owner_id != owner_id)
-        return;
-    context_menu_presenter_t presenter(rt.menus, rt.actions, &rt.shortcuts);
-    render_context_menu_popup("##aida_retained_entity_context", presenter,
-        rt.retained_entity_popup_request, rt.retained_entity_popup_context);
 }
 
 std::string consume_retained_entity_action(const char* owner_id,
@@ -7870,6 +8141,152 @@ std::string consume_retained_entity_action(const char* owner_id,
     rt.retained_entity_executed_id.clear();
     rt.retained_entity_executed_action.clear();
     return action;
+}
+
+context_menu_presentation_t compose_pending_context_menu(
+    const stable_menu_id_t& menu) {
+    auto& rt = runtime();
+    initialize(rt);
+    const context_menu_open_request_t* request = nullptr;
+    const interaction_context_t* context = nullptr;
+    const std::string& id = menu.value();
+    if (id == "menu.editor.text" || id == "menu.editor.review") {
+        request = &rt.editor_popup_request;
+        context = &rt.editor_popup_context;
+    } else if (id == "menu.editor.tab") {
+        if (!file_tabs::is_valid_tab_index(rt.tab.index) ||
+            file_tabs::tabs[file_tabs::tab_index(rt.tab.index)].filepath != rt.tab.path ||
+            file_tabs::tabs[file_tabs::tab_index(rt.tab.index)].filename != rt.tab.name)
+            rt.tab_popup_context.generation = ++rt.generation;
+        request = &rt.tab_popup_request;
+        context = &rt.tab_popup_context;
+    } else if (id == "menu.explorer.entry" || id == "menu.explorer.empty") {
+        if (rt.explorer.index >= 0 &&
+            (static_cast<std::size_t>(rt.explorer.index) >= file_browser::entries.size() ||
+             file_browser::entries[static_cast<std::size_t>(rt.explorer.index)].full_path != rt.explorer.path))
+            rt.explorer_popup_context.generation = ++rt.generation;
+        request = &rt.explorer_popup_request;
+        context = &rt.explorer_popup_context;
+    } else if (id == "menu.workspace_search.result") {
+        std::lock_guard<std::mutex> lock(workspace_search::g_search.results_mtx);
+        const bool valid = rt.workspace_search.index >= 0 &&
+            static_cast<std::size_t>(rt.workspace_search.index) < workspace_search::g_search.results.size();
+        if (!valid || workspace_search::g_search.results[static_cast<std::size_t>(rt.workspace_search.index)].filepath != rt.workspace_search.path ||
+            workspace_search::g_search.results[static_cast<std::size_t>(rt.workspace_search.index)].line_number != rt.workspace_search.line)
+            rt.workspace_search_popup_context.generation = ++rt.generation;
+        request = &rt.workspace_search_popup_request;
+        context = &rt.workspace_search_popup_context;
+    } else if (id == "menu.programming.language.result") {
+        if (!programming_result_capability(rt.programming_result).enabled)
+            rt.programming_result_popup_context.generation = ++rt.generation;
+        request = &rt.programming_result_popup_request;
+        context = &rt.programming_result_popup_context;
+    } else if (id == "menu.recent.item") {
+        request = &rt.recent_popup_request;
+        context = &rt.recent_popup_context;
+    } else if (id == "menu.output.view") {
+        request = &rt.output_popup_request;
+        context = &rt.output_popup_context;
+    } else if (id == "menu.retained.entity" ||
+               id == rt.retained_entity_popup_request.menu.value()) {
+        request = &rt.retained_entity_popup_request;
+        context = &rt.retained_entity_popup_context;
+    }
+    context_menu_presenter_t presenter(rt.menus, rt.actions, &rt.shortcuts);
+    if (!request)
+        return presenter.compose(
+            context_menu_open_request_t{menu, context_menu_open_origin_t::pointer, 0},
+            interaction_context_t{});
+    return presenter.compose(*request, *context);
+}
+
+context_menu_presentation_t compose_pending_view_surface_context_menu(
+    const view_instance_id_t& instance) {
+    auto& rt = runtime();
+    initialize(rt);
+    if (!(rt.view_surface.instance == instance)) {
+        context_menu_presentation_t result;
+        result.status = context_menu_status_t::context_mismatch;
+        result.menu = rt.view_surface_popup_request.menu;
+        result.origin = rt.view_surface_popup_request.origin;
+        return result;
+    }
+    if (!host_is_instance_open(instance) ||
+        host_window_name(instance) != rt.view_surface.window_name)
+        rt.view_surface_popup_context.generation = ++rt.generation;
+    context_menu_presenter_t presenter(rt.menus, rt.actions, &rt.shortcuts);
+    return presenter.compose(rt.view_surface_popup_request,
+        rt.view_surface_popup_context);
+}
+
+context_menu_presentation_t compose_pending_retained_entity_context_menu(
+    const char* owner_id) {
+    auto& rt = runtime();
+    initialize(rt);
+    if (!owner_id || rt.retained_entity.retained.owner_id != owner_id) {
+        context_menu_presentation_t result;
+        result.status = context_menu_status_t::context_mismatch;
+        result.menu = rt.retained_entity_popup_request.menu;
+        result.origin = rt.retained_entity_popup_request.origin;
+        return result;
+    }
+    context_menu_presenter_t presenter(rt.menus, rt.actions, &rt.shortcuts);
+    return presenter.compose(rt.retained_entity_popup_request,
+        rt.retained_entity_popup_context);
+}
+
+action_execution_result_t execute_context_menu_action(
+    const stable_menu_id_t& menu, const char* action) {
+    auto& rt = runtime();
+    initialize(rt);
+    const context_menu_open_request_t* request = nullptr;
+    const interaction_context_t* context = nullptr;
+    const std::string& id = menu.value();
+    if (id == "menu.editor.text" || id == "menu.editor.review") {
+        request = &rt.editor_popup_request;
+        context = &rt.editor_popup_context;
+    } else if (id == "menu.editor.tab") {
+        request = &rt.tab_popup_request;
+        context = &rt.tab_popup_context;
+    } else if (id == "menu.explorer.entry" || id == "menu.explorer.empty") {
+        request = &rt.explorer_popup_request;
+        context = &rt.explorer_popup_context;
+    } else if (id == "menu.workspace_search.result") {
+        request = &rt.workspace_search_popup_request;
+        context = &rt.workspace_search_popup_context;
+    } else if (id == "menu.programming.language.result") {
+        request = &rt.programming_result_popup_request;
+        context = &rt.programming_result_popup_context;
+    } else if (id == "menu.recent.item") {
+        request = &rt.recent_popup_request;
+        context = &rt.recent_popup_context;
+    } else if (id == "menu.output.view") {
+        request = &rt.output_popup_request;
+        context = &rt.output_popup_context;
+    } else if (id == "menu.view.surface") {
+        request = &rt.view_surface_popup_request;
+        context = &rt.view_surface_popup_context;
+    } else if (id == "menu.retained.entity" ||
+               id == rt.retained_entity_popup_request.menu.value()) {
+        request = &rt.retained_entity_popup_request;
+        context = &rt.retained_entity_popup_context;
+    }
+    action_execution_result_t result;
+    if (!request) {
+        result.status = action_execution_status_t::not_found;
+        result.action = action_id(action);
+        result.message = "Context menu is not registered";
+        publish_action_execution_failure(action, result,
+            action_invocation_source_t::context_menu);
+        return result;
+    }
+    context_menu_presenter_t presenter(rt.menus, rt.actions, &rt.shortcuts);
+    action_invocation_t invocation{*context};
+    invocation.source = action_invocation_source_t::context_menu;
+    result = presenter.execute(*request, action_id(action), invocation);
+    finalize_action_execution(action, result,
+        action_invocation_source_t::context_menu, invocation.context);
+    return result;
 }
 
 }

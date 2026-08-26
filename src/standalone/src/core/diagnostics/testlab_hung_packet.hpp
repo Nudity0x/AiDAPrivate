@@ -164,7 +164,7 @@ inline void emit_testlab_breadcrumb(const char* phase, const char* step, bool is
     opts.reason = reason;
     opts.owner_subsystem = "testlab";
     opts.force = is_start;
-    metadata_ring::emit(std::move(opts));
+    metadata_ring::emit_breadcrumb(std::move(opts));
 }
 
 }

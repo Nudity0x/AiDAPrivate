@@ -1,0 +1,83 @@
+name: Build VCPKG package
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  build-test-install:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.11']
+        os:
+          - macos-latest
+          - ubuntu-latest
+          - windows-latest
+        include:
+          - os: windows-latest
+            platform: windows
+            arch: x64
+            vcpkg-triplet: x64-windows-static-release-md
+            cmake-preset: windows-x64
+          - os: ubuntu-latest
+            platform: linux
+            arch: x64
+            vcpkg-triplet: x64-linux-release
+            cmake-preset: linux-x64
+          - os: macos-latest
+            platform: macos
+            arch: arm64
+            vcpkg-triplet: arm64-macos-release
+            cmake-preset: macos-arm64
+
+    steps:
+      - name: Checkout Triton repository
+        uses: actions/checkout@v6
+
+      - name: Checkout vcpkg repository
+        uses: actions/checkout@v6
+        with:
+          repository: 'microsoft/vcpkg'
+          ref: '2026.03.18'
+          path: '${{ github.workspace }}/_vcpkg'
+          fetch-depth: 0
+
+      - name: Get CMake
+        uses: lukka/get-cmake@latest
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Setup MSVC dev environment
+        if: ${{ matrix.platform == 'windows' }}
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Configure
+        run: |
+          python -m pip install importlib-resources
+          cmake --preset=${{ matrix.cmake-preset }} -DBUILD_SHARED_LIBS:BOOL=ON -DVCPKG_OVERLAY_TRIPLETS:PATH=${{ github.workspace }}/vcpkg/triplets -DVCPKG_TARGET_TRIPLET:STRING=${{ matrix.vcpkg-triplet }}
+        env:
+          VCPKG_ROOT: ${{ github.workspace }}/_vcpkg
+          VCPKG_FEATURE_FLAGS: manifests,versions,binarycaching,registries
+
+      - name: Build Triton
+        run: |
+          cmake --build --preset build-${{ matrix.cmake-preset }} --config Release
+
+      - name: Run tests
+        run: |
+          python -m pip install lief unicorn z3-solver
+          ctest --preset test-${{ matrix.cmake-preset }} -C Release --output-on-failure
+
+      - name: Test installation
+        run: |
+          cmake --build --preset build-${{ matrix.cmake-preset }} --config Release --target install
+
+      - name: Upload package
+        uses: actions/upload-artifact@v7
+        with:
+          name: triton-${{ matrix.arch }}-${{ matrix.platform }}
+          path: ${{ github.workspace }}/out/install/${{ matrix.cmake-preset }}
+          if-no-files-found: warn

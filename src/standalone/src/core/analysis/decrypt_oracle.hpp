@@ -1,8 +1,5 @@
 #pragma once
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-#include "../../preview/scan_decrypt_preview.hpp"
-#else
 
 #include <algorithm>
 #include <atomic>
@@ -477,4 +474,3 @@ inline std::string export_as_json()
 
 }
 
-#endif

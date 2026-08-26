@@ -1,27 +1,15 @@
 #pragma once
-#include "imgui/imgui_internal.h"
 #include "../core/editor/code_editor.hpp"
 #include "../core/editor/programming_document_service.hpp"
 #include "../core/ui/task_center.hpp"
-#include "../core/ui/terminal_view.hpp"
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-#include "../preview/shell_preview_platform.hpp"
-#else
 #include "workspace_search.hpp"
 #include "../core/infra/executor.hpp"
 #include "diag_log.hpp"
 #include "../core/ui/ui_thread_dispatcher.hpp"
-#endif
+#include "../core/ai/conversation_history.hpp"
 #include <iostream>
 #include <cstdio>
 #include <cctype>
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-#include <cstdint>
-struct ID3D11ShaderResourceView;
-using DWORD = std::uint32_t;
-#else
-#include <d3d11.h>
-#endif
 #include <string>
 #include <string_view>
 #include <vector>
@@ -41,29 +29,21 @@ using DWORD = std::uint32_t;
 #include <fstream>
 #include <sstream>
 #include <system_error>
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
+#include <optional>
+#include <windows.h>
 #include <shlobj.h>
 #include <objbase.h>
-#endif
 
 namespace aida::shell_platform
 {
 	inline unsigned long long tick_ms()
 	{
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-		return static_cast<unsigned long long>(ImGui::GetTime() * 1000.0);
-#else
 		return GetTickCount64();
-#endif
 	}
 
 	inline unsigned long thread_id()
 	{
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-		return 1;
-#else
 		return GetCurrentThreadId();
-#endif
 	}
 }
 
@@ -115,13 +95,15 @@ enum class bottom_tab_t : int {
 
 
 namespace output_log {
-	inline std::deque<std::string> lines[static_cast<int>(bottom_tab_t::COUNT)];
+	struct entry_t {
+		std::string text;
+		std::string channel;
+	};
+	inline std::deque<entry_t> lines[static_cast<int>(bottom_tab_t::COUNT)];
 	inline constexpr size_t MAX_LINES = 4096;
-	inline constexpr size_t MAX_RENDER_LINES = 512;
 	inline std::mutex mutex;
 	inline uint64_t version[static_cast<int>(bottom_tab_t::COUNT)] = {};
 	inline bool auto_scroll[static_cast<int>(bottom_tab_t::COUNT)] = { true, true, true, true, true };
-	inline bool select_all[static_cast<int>(bottom_tab_t::COUNT)] = { false, false, false, false, false };
 	inline std::atomic<unsigned long> owner_tid{0};
 	inline std::atomic<unsigned long long> owner_since_ms{0};
 	inline std::atomic<int> owner_tab{-1};
@@ -131,8 +113,6 @@ namespace output_log {
 		switch (op) {
 			case 1: return "push";
 			case 2: return "clear";
-			case 3: return "set_select_all";
-			case 4: return "is_select_all";
 			case 5: return "is_auto_scroll";
 			case 6: return "size";
 			case 7: return "empty";
@@ -146,6 +126,7 @@ namespace output_log {
 			case 15: return "state_guard_restore";
 			case 16: return "try_clear";
 			case 17: return "try_set_auto_scroll";
+			case 18: return "push_channel";
 			default: return "unknown";
 		}
 	}
@@ -187,14 +168,22 @@ namespace output_log {
 		return idx;
 	}
 	inline void push(bottom_tab_t tab, const std::string& line) {
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 		if (tab == bottom_tab_t::terminal) return;
-#endif
 		int idx = tab_index(tab);
 		std::lock_guard<std::mutex> lk(mutex);
 		owner_scope owner(1, idx);
 		auto& q = lines[idx];
-		q.push_back(line);
+		q.push_back(entry_t{line, {}});
+		while (q.size() > MAX_LINES) q.pop_front();
+		++version[idx];
+	}
+	inline void push_channel(bottom_tab_t tab, const std::string& channel, const std::string& line) {
+		if (tab == bottom_tab_t::terminal) return;
+		int idx = tab_index(tab);
+		std::lock_guard<std::mutex> lk(mutex);
+		owner_scope owner(18, idx);
+		auto& q = lines[idx];
+		q.push_back(entry_t{line, channel});
 		while (q.size() > MAX_LINES) q.pop_front();
 		++version[idx];
 	}
@@ -203,20 +192,7 @@ namespace output_log {
 		std::lock_guard<std::mutex> lk(mutex);
 		owner_scope owner(2, idx);
 		lines[idx].clear();
-		select_all[idx] = false;
 		++version[idx];
-	}
-	inline void set_select_all(bottom_tab_t tab, bool enabled) {
-		int idx = tab_index(tab);
-		std::lock_guard<std::mutex> lk(mutex);
-		owner_scope owner(3, idx);
-		select_all[idx] = enabled;
-	}
-	inline bool is_select_all(bottom_tab_t tab) {
-		int idx = tab_index(tab);
-		std::lock_guard<std::mutex> lk(mutex);
-		owner_scope owner(4, idx);
-		return select_all[idx];
 	}
 	inline bool is_auto_scroll(bottom_tab_t tab) {
 		int idx = tab_index(tab);
@@ -242,14 +218,14 @@ namespace output_log {
 		owner_scope owner(8, idx);
 		return version[idx];
 	}
-	inline void snapshot_all(bottom_tab_t tab, std::deque<std::string>& out, uint64_t* out_version = nullptr) {
+	inline void snapshot_all(bottom_tab_t tab, std::deque<entry_t>& out, uint64_t* out_version = nullptr) {
 		int idx = tab_index(tab);
 		std::lock_guard<std::mutex> lk(mutex);
 		owner_scope owner(9, idx);
 		out = lines[idx];
 		if (out_version) *out_version = version[idx];
 	}
-	inline void snapshot_tail(bottom_tab_t tab, size_t max_lines, std::vector<std::string>& out, size_t* total_lines = nullptr, uint64_t* out_version = nullptr) {
+	inline void snapshot_tail(bottom_tab_t tab, size_t max_lines, std::vector<entry_t>& out, size_t* total_lines = nullptr, uint64_t* out_version = nullptr) {
 		int idx = tab_index(tab);
 		std::lock_guard<std::mutex> lk(mutex);
 		owner_scope owner(10, idx);
@@ -266,7 +242,7 @@ namespace output_log {
 		if (total_lines) *total_lines = total;
 		if (out_version) *out_version = version[idx];
 	}
-	inline bool try_snapshot_all(bottom_tab_t tab, std::deque<std::string>& out, uint64_t* out_version = nullptr) {
+	inline bool try_snapshot_all(bottom_tab_t tab, std::deque<entry_t>& out, uint64_t* out_version = nullptr) {
 		int idx = tab_index(tab);
 		std::unique_lock<std::mutex> lk(mutex, std::try_to_lock);
 		if (!lk.owns_lock())
@@ -276,7 +252,7 @@ namespace output_log {
 		if (out_version) *out_version = version[idx];
 		return true;
 	}
-	inline bool try_snapshot_tail_if_changed(bottom_tab_t tab, size_t max_lines, uint64_t& known_version, std::vector<std::string>& out, size_t* total_lines = nullptr, bool* changed = nullptr) {
+	inline bool try_snapshot_tail_if_changed(bottom_tab_t tab, size_t max_lines, uint64_t& known_version, std::vector<entry_t>& out, size_t* total_lines = nullptr, bool* changed = nullptr) {
 		int idx = tab_index(tab);
 		std::unique_lock<std::mutex> lk(mutex, std::try_to_lock);
 		if (!lk.owns_lock())
@@ -317,7 +293,6 @@ namespace output_log {
 			return false;
 		owner_scope owner(16, idx);
 		lines[idx].clear();
-		select_all[idx] = false;
 		++version[idx];
 		return true;
 	}
@@ -330,14 +305,6 @@ namespace output_log {
 		auto_scroll[idx] = enabled;
 		return true;
 	}
-}
-
-
-namespace menu_bar {
-	inline int  open_menu = -1;
-	inline bool any_open  = false;
-	inline bool open_request = false;
-	inline int  suppress_frames = 0;
 }
 
 
@@ -372,56 +339,7 @@ struct ChatMessage {
 	std::string model_id;
 };
 
-inline bool  g_ai_thinking_active = false;
-
 inline std::vector<ChatMessage> g_chat_messages;
-inline char                     g_chat_buf[4096] = {};
-inline bool                     g_chat_scroll_to_bottom = false;
-
-namespace chat_inject {
-
-	inline std::mutex&        queue_mutex() { static std::mutex m; return m; }
-	inline std::deque<std::string>& queue()       { static std::deque<std::string> q; return q; }
-
-	inline void post(const std::string& text)
-	{
-		if (text.empty()) return;
-		std::lock_guard<std::mutex> lk(queue_mutex());
-		queue().push_back(text);
-	}
-
-	inline bool drain_into_buffer()
-	{
-		std::deque<std::string> local;
-		{
-			std::lock_guard<std::mutex> lk(queue_mutex());
-			if (queue().empty()) return false;
-			local.swap(queue());
-		}
-
-		const size_t cap = sizeof(g_chat_buf) - 1u;
-		bool any_appended = false;
-		for (const auto& text : local) {
-			if (text.empty()) continue;
-			size_t cur = std::strlen(g_chat_buf);
-			if (cur + text.size() >= cap) continue;
-			if (cur > 0 && cur + 2u < cap) {
-				g_chat_buf[cur] = '\n';
-				g_chat_buf[cur + 1u] = '\n';
-				g_chat_buf[cur + 2u] = '\0';
-				cur += 2u;
-			}
-			const size_t room = cap - cur;
-			const size_t copy = (text.size() < room) ? text.size() : room;
-			std::memcpy(g_chat_buf + cur, text.data(), copy);
-			g_chat_buf[cur + copy] = '\0';
-			any_appended = true;
-		}
-		return any_appended;
-	}
-
-}
-
 
 inline std::vector<const ChatMessage*> get_effective_api_history()
 {
@@ -437,56 +355,7 @@ inline std::vector<const ChatMessage*> get_effective_api_history()
 }
 
 
-namespace chat_edit {
-	inline bool  active = false;
-	inline int   msg_idx = -1;
-	inline char  buf[4096] = {};
-}
-
-namespace chat_select_popup {
-	inline bool        open = false;
-	inline std::string text;
-}
-
-struct ConversationSummary {
-	std::string id;
-	std::string title;
-	int64_t     created = 0;
-	int         msg_count = 0;
-	bool        pinned = false;
-	std::uint64_t revision = 0;
-};
-
-namespace conversations {
-	inline std::vector<ConversationSummary> history;
-	inline std::shared_ptr<const std::vector<ConversationSummary>> published_history =
-		std::make_shared<const std::vector<ConversationSummary>>();
-	inline std::string current_id;
-	inline bool browser_open = false;
-	inline std::uint64_t current_revision = 0;
-	inline bool current_identity_uncommitted = false;
-	inline std::uint64_t catalog_generation = 0;
-	inline std::string persistence_error;
-
-	void save_current();
-	void load_conversation(const std::string& id);
-	void new_chat();
-	void refresh_history();
-	void delete_conversation(const std::string& id, std::uint64_t reviewed_revision);
-	bool set_pinned(const std::string& id, bool pinned);
-	bool fork_conversation(const std::string& id, std::string& forked_id);
-	bool export_markdown(const std::string& id, const std::string& output_path,
-		std::string& error);
-	void process_store_completion(bool allow_deferred = true);
-	bool commit_shutdown(std::string& error);
-	std::shared_ptr<const std::vector<ConversationSummary>> catalog_snapshot();
-}
-
-
 void tick_ai_chat();
-void poll_ai_chat();
-
-inline ImFont* g_code_font = nullptr;
 
 
 struct FileBrowserEntry {
@@ -585,93 +454,17 @@ namespace code_editor
 }
 
 
-struct ThemePreset {
-	const char* name;
-	ImVec4      accent;
-	ImU32       bg_base;
-	ImU32       panel_bg;
-	ImU32       panel_header;
-	ImU32       title_bar;
-	ImU32       text_primary;
-	ImU32       text_secondary;
-	ImU32       text_dim;
-};
-
-namespace themes
-{
-	inline const ThemePreset presets[] = {
-
-		{ "AiDA Dark",
-		  ImVec4(56.f/255.f, 134.f/255.f, 240.f/255.f, 1.f),
-		  IM_COL32(10, 14, 26, 235),
-		  IM_COL32(15, 21, 38, 214),
-		  IM_COL32(26, 35, 60, 232),
-		  IM_COL32(12, 17, 31, 232),
-		  IM_COL32(226, 234, 250, 242),
-		  IM_COL32(158, 174, 206, 206),
-		  IM_COL32(108, 124, 160, 182)
-		},
-
-		{ "AiDA Light",
-		  ImVec4(42.f/255.f, 104.f/255.f, 216.f/255.f, 1.f),
-		  IM_COL32(244, 246, 251, 250),
-		  IM_COL32(251, 252, 255, 232),
-		  IM_COL32(231, 237, 248, 234),
-		  IM_COL32(231, 237, 248, 232),
-		  IM_COL32(22, 28, 44, 252),
-		  IM_COL32(78, 92, 122, 232),
-		  IM_COL32(140, 152, 178, 220)
-		},
-
-		{ "Claude Dark",
-		  ImVec4(0xF4/255.f, 0x84/255.f, 0x5F/255.f, 1.f),
-		  IM_COL32(0x26, 0x26, 0x24, 235),
-		  IM_COL32(0x26, 0x26, 0x24, 222),
-		  IM_COL32(0x1E, 0x1E, 0x1C, 232),
-		  IM_COL32(0x1A, 0x1A, 0x18, 232),
-		  IM_COL32(0xE8, 0xE4, 0xDC, 242),
-		  IM_COL32(0xB8, 0xB1, 0xA4, 218),
-		  IM_COL32(0x88, 0x88, 0x88, 200)
-		},
-
-		{ "Claude Light",
-		  ImVec4(0xC1/255.f, 0x5F/255.f, 0x3C/255.f, 1.f),
-		  IM_COL32(0xF4, 0xF3, 0xEE, 250),
-		  IM_COL32(0xFA, 0xF9, 0xF5, 232),
-		  IM_COL32(0xE9, 0xEC, 0xEC, 234),
-		  IM_COL32(0xE9, 0xEC, 0xEC, 232),
-		  IM_COL32(0x1F, 0x1E, 0x1D, 252),
-		  IM_COL32(0x6F, 0x6F, 0x78, 232),
-		  IM_COL32(0xB1, 0xAD, 0xA1, 220)
-		},
-	};
-	inline constexpr int count = sizeof(presets) / sizeof(presets[0]);
-	inline int active = 0;
-	inline bool changed = true;
-	inline ThemePreset resolved = {};
-	inline char resolved_name_buf[128] = {};
-}
+namespace aida::terminal { struct TerminalManager; }
 
 namespace globals
 {
 
-	inline ID3D11ShaderResourceView* bullet_srv = nullptr;
-
-
-	inline terminal_view::TerminalManager terminal_mgr;
+	inline aida::terminal::TerminalManager* terminal_mgr = nullptr;
 
 	namespace ui
 	{
-		inline ImVec4 accent = ImVec4(134.f / 255.f, 135.f / 255.f, 254.f / 255.f, 1.f);
-
-
-		inline float load_timer = 0.f;
-		inline std::atomic<bool>* bg_init_done = nullptr;
-		inline std::atomic<int>  bg_init_step{0};
-		inline std::atomic<int>  bg_init_total{6};
 		inline float window_w = 250;
 		inline float window_h = 200;
-		inline float ui_alpha = 0.f;
 		inline bool test = false;
 
 		inline float test2 = 0.0f;
@@ -691,19 +484,6 @@ namespace globals
 		inline char quick_open_buf[128] = {};
 
 
-		inline bool process_attach_open = false;
-		inline char process_filter_buf[128] = {};
-
-
-		inline bool driver_status_open = false;
-
-
-		inline bool shortcuts_dialog_open = false;
-
-
-		inline bool test_all_visible = false;
-
-
 		inline bool find_bar_open = false;
 		inline char find_buf[256] = {};
 		inline char replace_buf[256] = {};
@@ -714,16 +494,6 @@ namespace globals
 		inline int  find_match_count = 0;
 		inline int  find_current_match = -1;
 		inline std::vector<int> find_match_positions;
-
-
-		inline bool mcp_servers_dialog_open = false;
-
-
-		inline bool  ctx_menu_open = false;
-		inline ImVec2 ctx_menu_pos = ImVec2(0, 0);
-		inline int    ctx_menu_target = -1;
-		enum class ctx_menu_source_t { none, file_browser, code_editor, chat_message };
-		inline ctx_menu_source_t ctx_menu_source = ctx_menu_source_t::none;
 
 
 		inline bool        ghost_text_active = false;
@@ -744,12 +514,6 @@ namespace globals
 		inline std::string current_indent = "Spaces: 4";
 
 
-		inline bool tool_approval_pending = false;
-		inline std::string tool_approval_name;
-		inline std::string tool_approval_args;
-		inline std::function<void(bool)> tool_approval_callback;
-
-
 		inline std::string status_file_info;
 		inline std::string status_driver_info;
 		inline std::string status_model_info;
@@ -762,7 +526,6 @@ namespace globals
 		inline float welcome_timer = 0.f;
 		inline float welcome_alpha = 0.f;
 		inline float welcome_text_y_offset = 30.f;
-		inline bool welcome_done = false;
 
 
 		inline float dpi_scale = 1.0f;
@@ -775,29 +538,6 @@ namespace globals
 	}
 
 
-}
-
-
-struct CustomThemeData {
-	std::string name = "Custom Theme";
-	float accent[3] = { 0.53f, 0.53f, 1.0f };
-	ImU32 bg_base      = IM_COL32(4, 8, 30, 235);
-	ImU32 panel_bg     = IM_COL32(22, 22, 28, 210);
-	ImU32 panel_header = IM_COL32(34, 34, 44, 230);
-	ImU32 title_bar    = IM_COL32(16, 16, 22, 230);
-	ImU32 text_primary   = IM_COL32(230, 228, 255, 240);
-	ImU32 text_secondary = IM_COL32(170, 175, 190, 200);
-	ImU32 text_dim       = IM_COL32(110, 105, 145, 140);
-	int   icon_index     = 3;
-	std::string icon_file_path;
-};
-
-namespace custom_themes {
-	inline std::vector<CustomThemeData> list;
-	inline int  active_custom = -1;
-	inline bool editor_open   = false;
-	inline int  editing_idx   = -1;
-	inline CustomThemeData editing_copy;
 }
 
 
@@ -1086,19 +826,13 @@ namespace file_tabs {
 	inline int find_document(std::uint64_t document_id);
 
 	inline std::int64_t disk_write_version(const std::string& fpath) {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-		(void)fpath;
-		return 0;
-#else
 		if (fpath.empty()) return 0;
 		std::error_code ec;
 		const auto value = std::filesystem::last_write_time(fpath, ec);
 		return ec ? 0 : static_cast<std::int64_t>(value.time_since_epoch().count());
-#endif
 	}
 
 	inline void poll_external_changes() {
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 		for (auto& pending : tabs) {
 			if (pending.watch_dispatch_failed &&
 				pending.watch_dispatch_failed->exchange(false, std::memory_order_acq_rel)) {
@@ -1163,7 +897,6 @@ namespace file_tabs {
 			tab.watch_dispatch_failed.reset();
 			tab.save_error = "The external-change probe could not be scheduled: " + submitted.reject_reason;
 		}
-#endif
 	}
 
 	inline void load_tab_into_editor(int idx);
@@ -1310,16 +1043,6 @@ namespace file_tabs {
 			}
 			return;
 		}
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-		t.buffer.clear();
-		t.buffer_loaded = true;
-			t.dirty = false;
-			static_cast<void>(code_editor_widget::load_document(t.document_id, t.revision,
-				t.buffer, t.filename, t.filepath, false, t.caret_line, t.caret_column,
-				t.scroll_x, t.scroll_y, false, t.selection_anchor_line,
-				t.selection_anchor_column, t.selection_active, t.folded_lines,
-				t.language_override));
-#else
 		if (t.load_in_progress)
 			return;
 		t.load_in_progress = true;
@@ -1562,7 +1285,6 @@ namespace file_tabs {
 				t.load_error = "Task Center could not own document loading; the operation was cancelled.";
 			}
 		}
-#endif
 	}
 
 	inline void observe_document_load_dispatch_failure(int idx) {
@@ -1578,10 +1300,8 @@ namespace file_tabs {
 		if (loading != document_load_controls.end()) {
 			if (loading->second.cancelled)
 				loading->second.cancelled->store(true, std::memory_order_release);
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 			if (loading->second.task_id != 0)
 				aida::infra::executor::cancel(loading->second.task_id);
-#endif
 			document_load_controls.erase(loading);
 		}
 		++tab.load_generation;
@@ -1692,9 +1412,6 @@ namespace file_tabs {
 	};
 
 	inline std::optional<save_result_t> shell_save_as_result;
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-	inline std::function<std::optional<save_result_t>(int)> preview_save_interceptor;
-#endif
 
 	inline save_result_t verify_tab_save_gate(int idx, bool require_destination) {
 		if (!is_valid_tab_index(idx))
@@ -1833,17 +1550,6 @@ namespace file_tabs {
 		tab.recovery_dispatch_failed = dispatch_failed;
 		tab.recovery_operation_pending = true;
 		tab.recovery_operation_label = "Checking recovery journal";
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-		static_cast<void>(document_id);
-		static_cast<void>(generation);
-		static_cast<void>(original_path);
-		static_cast<void>(identity);
-		static_cast<void>(dispatch_failed);
-		tab.recovery_probe_completed = true;
-		tab.recovery_operation_pending = false;
-		tab.recovery_operation_label.clear();
-		tab.recovery_dispatch_failed.reset();
-#else
 		aida::infra::executor::submission_t sub;
 		sub.owner_subsystem = "file_tabs";
 		sub.label = "file_tabs.recovery_probe";
@@ -1894,7 +1600,6 @@ namespace file_tabs {
 			tab.recovery_probe_completed = true;
 			tab.recovery_error = "Recovery probe scheduling failed: " + submitted.reject_reason;
 		}
-#endif
 	}
 
 	enum class recovery_load_mode_t : std::uint8_t { recover, compare };
@@ -1922,18 +1627,6 @@ namespace file_tabs {
 		tab.recovery_operation_pending = true;
 		tab.recovery_operation_label = mode == recovery_load_mode_t::recover
 			? "Loading recovery content" : "Preparing recovery comparison";
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-		static_cast<void>(reference);
-		static_cast<void>(document_id);
-		static_cast<void>(revision);
-		static_cast<void>(content_hash);
-		static_cast<void>(generation);
-		static_cast<void>(dispatch_failed);
-		tab.recovery_operation_pending = false;
-		tab.recovery_operation_label.clear();
-		tab.recovery_dispatch_failed.reset();
-		return {false, "Recovery storage is intentionally unavailable in deterministic Preview."};
-#else
 		aida::infra::executor::submission_t sub;
 		sub.owner_subsystem = "file_tabs";
 		sub.label = mode == recovery_load_mode_t::recover
@@ -2011,7 +1704,6 @@ namespace file_tabs {
 			return {false, tab.recovery_error};
 		}
 		return {true, {}};
-#endif
 	}
 
 	inline save_result_t recover_from_journal(int idx) {
@@ -2041,18 +1733,6 @@ namespace file_tabs {
 		tab.recovery_dispatch_failed = dispatch_failed;
 		tab.recovery_operation_pending = true;
 		tab.recovery_operation_label = "Preparing disk comparison";
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-		static_cast<void>(document_id);
-		static_cast<void>(revision);
-		static_cast<void>(content_hash);
-		static_cast<void>(generation);
-		static_cast<void>(path);
-		static_cast<void>(dispatch_failed);
-		tab.recovery_operation_pending = false;
-		tab.recovery_operation_label.clear();
-		tab.recovery_dispatch_failed.reset();
-		return {false, "Disk comparison is intentionally unavailable in deterministic Preview."};
-#else
 		aida::infra::executor::submission_t sub;
 		sub.owner_subsystem = "file_tabs";
 		sub.label = "file_tabs.disk_compare";
@@ -2129,7 +1809,6 @@ namespace file_tabs {
 			return {false, tab.recovery_error};
 		}
 		return {true, {}};
-#endif
 	}
 
 	inline save_result_t discard_recovery(int idx) {
@@ -2147,16 +1826,6 @@ namespace file_tabs {
 		tab.recovery_dispatch_failed = dispatch_failed;
 		tab.recovery_operation_pending = true;
 		tab.recovery_operation_label = "Discarding recovery journals";
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-		static_cast<void>(reference);
-		static_cast<void>(document_id);
-		static_cast<void>(generation);
-		static_cast<void>(dispatch_failed);
-		tab.recovery_operation_pending = false;
-		tab.recovery_operation_label.clear();
-		tab.recovery_dispatch_failed.reset();
-		return {true, {}};
-#else
 		aida::infra::executor::submission_t sub;
 		sub.owner_subsystem = "file_tabs";
 		sub.label = "file_tabs.recovery_discard";
@@ -2196,7 +1865,6 @@ namespace file_tabs {
 			return {false, tab.recovery_error};
 		}
 		return {true, {}};
-#endif
 	}
 
 	inline save_result_t request_recovery_discard(int idx) {
@@ -2214,10 +1882,6 @@ namespace file_tabs {
 	inline void schedule_confirmed_recovery_cleanup(
 			aida::editor::programming_documents::document_record_t identity,
 			std::uint64_t outcome_revision) {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-		static_cast<void>(identity);
-		static_cast<void>(outcome_revision);
-#else
 		const std::uint64_t document_id = identity.document_id;
 		aida::infra::executor::submission_t sub;
 		sub.owner_subsystem = "file_tabs";
@@ -2247,7 +1911,6 @@ namespace file_tabs {
 				"recovery_cleanup_submit_failed document_id=%llu reason=%.512s",
 				static_cast<unsigned long long>(document_id),
 				submitted.reject_reason.c_str());
-#endif
 	}
 
 	inline void schedule_confirmed_recovery_cleanup(const OpenTab& tab) {
@@ -2306,10 +1969,8 @@ namespace file_tabs {
 		if (loading == document_load_controls.end()) return false;
 		if (loading->second.cancelled)
 			loading->second.cancelled->store(true, std::memory_order_release);
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 		if (loading->second.task_id != 0)
 			aida::infra::executor::cancel(loading->second.task_id);
-#endif
 		document_load_controls.erase(loading);
 		++tab.load_generation;
 		tab.load_in_progress = false;
@@ -2374,10 +2035,6 @@ namespace file_tabs {
 	inline save_result_t atomic_write_file(const std::string& path,
 			const std::string& content) {
 		if (path.empty()) return {false, "No destination path was selected."};
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-		static_cast<void>(content);
-		return {true, {}};
-#else
 		const std::filesystem::path destination(path);
 		const auto parent = destination.parent_path();
 		std::error_code ec;
@@ -2439,7 +2096,6 @@ namespace file_tabs {
 				std::to_string(error) + ")."};
 		}
 		return {true, {}};
-#endif
 	}
 
 	inline save_result_t save_tab_to_disk_result(int idx,
@@ -2454,12 +2110,6 @@ namespace file_tabs {
 		auto& t = tabs[tab_index(idx)];
 		const std::string destination = destination_override ? *destination_override : t.filepath;
 		if (destination.empty()) return {false, "Use Save As to choose a destination."};
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-		if (preview_save_interceptor) {
-			if (auto intercepted = preview_save_interceptor(idx))
-				return *intercepted;
-		}
-#endif
 		code_editor_widget::document_payload_snapshot_t payload;
 		try {
 			payload = code_editor_widget::document_payload(t.document_id);
@@ -2483,46 +2133,6 @@ namespace file_tabs {
 			std::to_string(document_id) + "." + std::to_string(generation);
 		t.save_in_progress = true;
 		t.save_error.clear();
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-		const auto encoded = aida::editor::programming_documents::encode_file_text(
-			payload.content, text_metadata);
-		if (!encoded.succeeded) {
-			t.save_in_progress = false;
-			t.save_error = encoded.detail;
-			return {false, encoded.detail};
-		}
-		const auto written = atomic_write_file(destination, encoded.bytes);
-		if (!written.succeeded) {
-			t.save_in_progress = false;
-			t.save_error = written.detail;
-			return written;
-		}
-		t.save_in_progress = false;
-		t.buffer = payload.content;
-		t.buffer_loaded = true;
-		t.revision = revision;
-		++t.recovery_operation_generation;
-		t.recovery_operation_pending = false;
-		t.recovery_operation_label.clear();
-		t.recovery_dispatch_failed.reset();
-		t.dirty = false;
-		t.base_fingerprint = content_hash;
-		t.content_hash = content_hash;
-		t.recovery = {};
-		t.recovery_error.clear();
-		t.recovery_probe_completed = true;
-		t.external_conflict = false;
-		t.external_overwrite_approved = false;
-		if (save_as) {
-			t.filepath = destination;
-			t.filename = saved_filename;
-		}
-		t.disk_write_version = disk_write_version(t.filepath);
-		code_editor_widget::mark_document_saved(document_id, revision,
-			t.filename, t.filepath);
-		schedule_confirmed_recovery_cleanup(t);
-		return {true, {}};
-#else
 		const std::int64_t expected_disk_version = save_as ? 0 : t.disk_write_version;
 		auto dispatch_failed = std::make_shared<std::atomic<bool>>(false);
 		auto cancelled = std::make_shared<std::atomic<bool>>(false);
@@ -2670,7 +2280,6 @@ namespace file_tabs {
 			return {false, t.save_error};
 		}
 		return {true, "Save scheduled in Task Center."};
-#endif
 	}
 
 	inline bool save_tab_to_disk(int idx) {
@@ -2734,17 +2343,6 @@ namespace file_tabs {
 		} catch (const std::bad_alloc&) {
 			return {false, "The complete bounded Save All revision set could not be captured."};
 		}
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-		for (auto& item : items) {
-			const int index = find_document(item.document_id);
-			if (!is_valid_tab_index(index))
-				return {false, "A modified document closed after Save All preflight."};
-			const auto result = save_tab_to_disk_result(index, nullptr, true);
-			if (!result.succeeded)
-				return result;
-		}
-		return {true, {}};
-#else
 		std::shared_ptr<std::vector<save_all_item_t>> batch;
 		try {
 			batch = std::make_shared<std::vector<save_all_item_t>>(std::move(items));
@@ -2920,7 +2518,6 @@ namespace file_tabs {
 			return {false, "Task Center could not own Save All; cancellation was requested."};
 		}
 		return {true, "The complete captured revision set was scheduled as one Save All task."};
-#endif
 	}
 
 	inline bool save_active_to_disk() {
@@ -3102,13 +2699,8 @@ namespace file_tabs {
 				closing.group_id, closing.caret_line, closing.caret_column};
 			closed_documents.erase(std::remove_if(closed_documents.begin(),
 				closed_documents.end(), [&closed](const closed_document_t& entry) {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-					return std::filesystem::path(entry.filepath).lexically_normal() ==
-						std::filesystem::path(closed.filepath).lexically_normal();
-#else
 					return std::filesystem::u8path(entry.filepath).lexically_normal() ==
 						std::filesystem::u8path(closed.filepath).lexically_normal();
-#endif
 				}), closed_documents.end());
 			closed_documents.push_front(closed);
 			constexpr std::size_t maximum_closed_documents = 32;
@@ -3122,10 +2714,8 @@ namespace file_tabs {
 		if (loading != document_load_controls.end()) {
 			if (loading->second.cancelled)
 				loading->second.cancelled->store(true, std::memory_order_release);
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 			if (loading->second.task_id != 0)
 				aida::infra::executor::cancel(loading->second.task_id);
-#endif
 			document_load_controls.erase(loading);
 		}
 		code_editor_widget::discard_document_state(removed_document);
@@ -3204,15 +2794,6 @@ namespace file_tabs {
 		const auto record = recovery_record(tab);
 		auto dispatch_failed = std::make_shared<std::atomic<bool>>(false);
 		tab.recovery_checkpoint_dispatch_failed = dispatch_failed;
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-		static_cast<void>(document_id);
-		static_cast<void>(generation);
-		static_cast<void>(record);
-		static_cast<void>(dispatch_failed);
-		tab.recovery_checkpoint_pending = false;
-		tab.recovery_checkpoint_hash = hash;
-		tab.recovery_checkpoint_dispatch_failed.reset();
-#else
 		aida::infra::executor::submission_t sub;
 		sub.owner_subsystem = "file_tabs";
 		sub.label = "file_tabs.recovery_checkpoint";
@@ -3265,7 +2846,6 @@ namespace file_tabs {
 				"recovery_checkpoint_submit_failed document_id=%llu reason=%.512s",
 				static_cast<unsigned long long>(document_id), submitted.reject_reason.c_str());
 		}
-#endif
 	}
 
 	inline void write_hot_exit_snapshot_all() {
@@ -3274,11 +2854,9 @@ namespace file_tabs {
 			if (!t.dirty || !t.buffer_loaded) continue;
 			const auto payload = code_editor_widget::document_payload(t.document_id);
 			if (!payload.found || payload.read_only) {
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 				diag::log_tagged_critical_fmt("file_tabs",
 					"hot_exit_capture_failed document_id=%llu",
 					static_cast<unsigned long long>(t.document_id));
-#endif
 				continue;
 			}
 			t.buffer = payload.content;
@@ -3290,13 +2868,11 @@ namespace file_tabs {
 			t.scroll_y = payload.scroll_y;
 			const auto committed =
 				aida::editor::programming_documents::commit(recovery_record(t));
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 			if (!committed.succeeded)
 				diag::log_tagged_critical_fmt("file_tabs",
 					"recovery_commit_failed document_id=%llu path=%.260s reason=%.512s",
 					static_cast<unsigned long long>(t.document_id), t.filepath.c_str(),
 					committed.detail.c_str());
-#endif
 		}
 	}
 
@@ -3487,16 +3063,6 @@ namespace file_tabs {
 		tab.recovery_operation_label = "Sealing discarded recovery state";
 		tab.recovery_error.clear();
 		exit_review_cleanup_requested_revisions[document_id] = revision;
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-		static_cast<void>(identity);
-		static_cast<void>(generation);
-		static_cast<void>(dispatch_failed);
-		tab.recovery_operation_pending = false;
-		tab.recovery_operation_label.clear();
-		tab.recovery_dispatch_failed.reset();
-		exit_review_cleanup_completed_revisions[document_id] = revision;
-		return {true, {}};
-#else
 		aida::infra::executor::submission_t sub;
 		sub.owner_subsystem = "file_tabs";
 		sub.label = "file_tabs.exit_discard_cleanup";
@@ -3554,7 +3120,6 @@ namespace file_tabs {
 			return {false, "Recovery cleanup scheduling failed: " + submitted.reject_reason};
 		}
 		return {true, {}};
-#endif
 	}
 
 	inline void poll_exit_review() {

@@ -3346,7 +3346,7 @@ namespace
             wd_opts.reason = ok ? "ok" : (connected ? "probe_failed" : "not_connected");
             wd_opts.owner_subsystem = "driver_bridge";
             wd_opts.status_code = ok ? 0 : static_cast<std::uint16_t>(GetLastError() & 0xFFFFu);
-            aida::diagnostics::emit(std::move(wd_opts));
+            aida::diagnostics::emit_breadcrumb(std::move(wd_opts));
             if (ok) {
                 g_driver_watchdog_last_ok_tick.store(GetTickCount64(), std::memory_order_release);
                 g_driver_consecutive_fail.store(0, std::memory_order_release);

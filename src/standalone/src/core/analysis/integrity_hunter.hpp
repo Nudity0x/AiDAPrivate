@@ -1,8 +1,5 @@
 #pragma once
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-#include "../../preview/scan_integrity_preview.hpp"
-#else
 
 #include <atomic>
 #include <chrono>
@@ -1016,4 +1013,3 @@ inline bool restore(int node_index)
 
 }
 
-#endif

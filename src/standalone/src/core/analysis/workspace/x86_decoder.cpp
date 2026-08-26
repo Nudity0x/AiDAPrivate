@@ -1,9 +1,7 @@
 #include "x86_decoder.hpp"
 
 #include "checked_range.hpp"
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 #include "live_snapshot_provider.hpp"
-#endif
 
 #include <Zydis/Zydis.h>
 #include <Zycore/Zycore.h>
@@ -155,13 +153,6 @@ workspace_result_t<std::uint64_t> instruction_provider_offset(
         return image.rva_to_file_offset(rva.value(), instruction.length);
     }
     case address_space_id_t::live_virtual: {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-        static_cast<void>(provider);
-        return workspace_result_t<std::uint64_t>::failure(
-            make_workspace_error(workspace_error_code_t::unsupported_address_space,
-                                 "live instruction snapshots are unavailable in Studio preview",
-                                 "x86_format"));
-#else
         const auto* snapshot = dynamic_cast<const live_snapshot_provider_t*>(&provider);
         if (!snapshot || instruction.address.value < snapshot->metadata().capture_address)
             return workspace_result_t<std::uint64_t>::failure(
@@ -174,7 +165,6 @@ workspace_result_t<std::uint64_t> instruction_provider_offset(
         if (!range)
             return workspace_result_t<std::uint64_t>::failure(range.error());
         return workspace_result_t<std::uint64_t>::success(offset);
-#endif
     }
     }
     return workspace_result_t<std::uint64_t>::failure(

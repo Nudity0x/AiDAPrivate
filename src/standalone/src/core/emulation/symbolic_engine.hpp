@@ -1,10 +1,5 @@
 #pragma once
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-
-#include "symbolic_engine_preview.hpp"
-
-#else
 
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
@@ -1206,4 +1201,3 @@ inline bool is_opaque_predicate(
 
 }
 
-#endif

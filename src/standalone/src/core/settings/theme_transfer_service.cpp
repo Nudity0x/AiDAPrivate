@@ -1,9 +1,5 @@
 #include "core/settings/theme_transfer_service.hpp"
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-#include "preview/shell_preview_platform.hpp"
-#include "preview/shell_preview.hpp"
-#else
 #include "core/infra/executor.hpp"
 #include "core/ui/task_center.hpp"
 #include "core/ui/ui_thread_dispatcher.hpp"
@@ -22,44 +18,9 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
-#endif
 
 namespace aida::theme_transfer {
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-
-request_result_t request_import(std::string) noexcept
-{
-    aida::preview::record(aida::preview::shell_action_t::open_file, "theme.import");
-    return request_result_t::preview_recorded;
-}
-
-request_result_t request_export(std::string, const theme_t&) noexcept
-{
-    aida::preview::record(aida::preview::shell_action_t::save_file, "theme.export");
-    return request_result_t::preview_recorded;
-}
-
-std::optional<completion_t> take_completion() noexcept
-{
-    return std::nullopt;
-}
-
-void acknowledge_import(std::uint64_t, bool, std::string) noexcept
-{
-}
-
-bool request_retry() noexcept
-{
-    return false;
-}
-
-status_t status() noexcept
-{
-    return {};
-}
-
-#else
 namespace {
 
 constexpr std::uint64_t kMaximumDocumentBytes = 1024ULL * 1024ULL;
@@ -640,6 +601,5 @@ status_t status() noexcept
     return current.ui_status;
 }
 
-#endif
 
 }

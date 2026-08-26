@@ -118,21 +118,12 @@ if(WIN32 AND MSVC)
     endif()
     set(_aida_openssl_lib_release "${_aida_openssl_root}/lib/VC/x64/MD")
     set(_aida_openssl_lib_debug   "${_aida_openssl_root}/lib/VC/x64/MDd")
-    set(_aida_openssl_lib_release_mt "${_aida_openssl_root}/lib/VC/x64/MT")
-    set(_aida_openssl_lib_debug_mt   "${_aida_openssl_root}/lib/VC/x64/MTd")
     if(NOT EXISTS "${_aida_openssl_lib_release}/libssl_static.lib"
        OR NOT EXISTS "${_aida_openssl_lib_release}/libcrypto_static.lib")
         message(FATAL_ERROR
             "OpenSSL static libraries not present at ${_aida_openssl_lib_release}. "
             "Reinstall OpenSSL with the static-libs option enabled so AiDAStandalone "
             "can link without runtime DLL dependencies (libssl-3-x64.dll / libcrypto-3-x64.dll).")
-    endif()
-    if(NOT EXISTS "${_aida_openssl_lib_release_mt}/libssl_static.lib"
-       OR NOT EXISTS "${_aida_openssl_lib_release_mt}/libcrypto_static.lib")
-        message(FATAL_ERROR
-            "OpenSSL /MT static libraries not present at ${_aida_openssl_lib_release_mt}. "
-            "Reinstall OpenSSL with the static-libs option enabled so AiDAStandalone "
-            "can be shipped as a single executable.")
     endif()
 
     add_library(aida_openssl_crypto STATIC IMPORTED GLOBAL)
@@ -155,28 +146,6 @@ if(WIN32 AND MSVC)
         IMPORTED_LOCATION_DEBUG          "${_aida_openssl_lib_debug}/libssl_static.lib"
         INTERFACE_INCLUDE_DIRECTORIES    "${_aida_openssl_root}/include"
         INTERFACE_LINK_LIBRARIES         "aida_openssl_crypto"
-    )
-
-    add_library(aida_openssl_crypto_mt STATIC IMPORTED GLOBAL)
-    set_target_properties(aida_openssl_crypto_mt PROPERTIES
-        IMPORTED_LOCATION                "${_aida_openssl_lib_release_mt}/libcrypto_static.lib"
-        IMPORTED_LOCATION_RELEASE        "${_aida_openssl_lib_release_mt}/libcrypto_static.lib"
-        IMPORTED_LOCATION_RELWITHDEBINFO "${_aida_openssl_lib_release_mt}/libcrypto_static.lib"
-        IMPORTED_LOCATION_MINSIZEREL     "${_aida_openssl_lib_release_mt}/libcrypto_static.lib"
-        IMPORTED_LOCATION_DEBUG          "${_aida_openssl_lib_debug_mt}/libcrypto_static.lib"
-        INTERFACE_INCLUDE_DIRECTORIES    "${_aida_openssl_root}/include"
-        INTERFACE_LINK_LIBRARIES         "ws2_32;crypt32;advapi32;user32;gdi32"
-    )
-
-    add_library(aida_openssl_ssl_mt STATIC IMPORTED GLOBAL)
-    set_target_properties(aida_openssl_ssl_mt PROPERTIES
-        IMPORTED_LOCATION                "${_aida_openssl_lib_release_mt}/libssl_static.lib"
-        IMPORTED_LOCATION_RELEASE        "${_aida_openssl_lib_release_mt}/libssl_static.lib"
-        IMPORTED_LOCATION_RELWITHDEBINFO "${_aida_openssl_lib_release_mt}/libssl_static.lib"
-        IMPORTED_LOCATION_MINSIZEREL     "${_aida_openssl_lib_release_mt}/libssl_static.lib"
-        IMPORTED_LOCATION_DEBUG          "${_aida_openssl_lib_debug_mt}/libssl_static.lib"
-        INTERFACE_INCLUDE_DIRECTORIES    "${_aida_openssl_root}/include"
-        INTERFACE_LINK_LIBRARIES         "aida_openssl_crypto_mt"
     )
 
     set(OPENSSL_FOUND TRUE CACHE BOOL "" FORCE)
@@ -321,7 +290,7 @@ function(aida_strip_msvc_runtime_compile_options target_name)
     endforeach()
 endfunction()
 
-function(aida_use_static_msvc_runtime)
+function(aida_use_dynamic_msvc_runtime)
     if(NOT MSVC)
         return()
     endif()
@@ -329,7 +298,7 @@ function(aida_use_static_msvc_runtime)
         if(TARGET ${_aida_runtime_target})
             aida_strip_msvc_runtime_compile_options(${_aida_runtime_target})
             set_property(TARGET ${_aida_runtime_target} PROPERTY
-                MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+                MSVC_RUNTIME_LIBRARY "MultiThreadedDLL$<$<CONFIG:Debug>:Debug>")
         endif()
     endforeach()
 endfunction()
@@ -829,7 +798,7 @@ set(MI_DEBUG OFF CACHE BOOL "" FORCE)
 set(MI_DEBUG_INTERNAL OFF CACHE BOOL "" FORCE)
 set(MI_GUARDED OFF CACHE BOOL "" FORCE)
 add_subdirectory("${DEPS_DIR}/mimalloc" "${CMAKE_BINARY_DIR}/.deps/mimalloc")
-aida_use_static_msvc_runtime(mimalloc-static)
+aida_use_dynamic_msvc_runtime(mimalloc-static)
 
 if(TARGET nlohmann_json OR TARGET nlohmann_json::nlohmann_json)
     message(FATAL_ERROR "AiDA: an unexpected nlohmann/json target exists before pinned local integration")
@@ -990,7 +959,7 @@ if(MSVC)
         set_property(TARGET ghidra_sleigh_compiler PROPERTY JOB_POOL_COMPILE aida_serial_compile)
     endif()
     target_compile_options(ghidra_sleigh_compiler PRIVATE /W0 /EHsc /O2)
-    aida_use_static_msvc_runtime(ghidra_sleigh_compiler)
+    aida_use_dynamic_msvc_runtime(ghidra_sleigh_compiler)
 endif()
 target_link_libraries(ghidra_sleigh_compiler PRIVATE zlibstatic)
 
@@ -1193,10 +1162,6 @@ endif()
 
 if(WIN32)
 
-    set(imgui_SOURCE_DIR "${DEPS_DIR}/imgui-src")
-    include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/aida_imgui_dependency.cmake")
-    aida_configure_imgui_dependency("${imgui_SOURCE_DIR}")
-
     option(BUILD_DRIVER_TEST "Build WhosWho driver test application" ON)
 
     if(BUILD_DRIVER_TEST)
@@ -1231,7 +1196,7 @@ if(WIN32)
             $<$<COMPILE_LANGUAGE:CXX>:/wd4201>
         )
 
-        aida_use_static_msvc_runtime(DriverTest)
+        aida_use_dynamic_msvc_runtime(DriverTest)
 
         target_link_libraries(DriverTest PRIVATE
             Zydis
@@ -1303,27 +1268,7 @@ if(WIN32)
         set(STANDALONE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/src/standalone/src")
         include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/aida_c03_dependencies.cmake")
         include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/aida_c03_safe_headless_manifest.cmake")
-
-        set(IMGUI_WRAPPER_DIR "${CMAKE_BINARY_DIR}/_imgui_wrapper/imgui")
-        file(MAKE_DIRECTORY "${IMGUI_WRAPPER_DIR}")
-        file(MAKE_DIRECTORY "${IMGUI_WRAPPER_DIR}/freetype")
-
-        file(GLOB _imgui_core_headers "${imgui_SOURCE_DIR}/*.h")
-        foreach(_h ${_imgui_core_headers})
-            get_filename_component(_name "${_h}" NAME)
-            file(WRITE "${IMGUI_WRAPPER_DIR}/${_name}" "#pragma once\n#include \"${_h}\"\n")
-        endforeach()
-
-        file(GLOB _imgui_backend_headers "${imgui_SOURCE_DIR}/backends/*.h")
-        foreach(_h ${_imgui_backend_headers})
-            get_filename_component(_name "${_h}" NAME)
-            file(WRITE "${IMGUI_WRAPPER_DIR}/${_name}" "#pragma once\n#include \"${_h}\"\n")
-        endforeach()
-
-        if(EXISTS "${imgui_SOURCE_DIR}/misc/freetype/imgui_freetype.h")
-            file(WRITE "${IMGUI_WRAPPER_DIR}/freetype/freetype.h"
-                 "#pragma once\n#include \"${imgui_SOURCE_DIR}/misc/freetype/imgui_freetype.h\"\n")
-        endif()
+        include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/aida_qt6_dependency.cmake")
 
         set(IDA_STUBS_DIR "${CMAKE_BINARY_DIR}/_ida_stubs")
         file(MAKE_DIRECTORY "${IDA_STUBS_DIR}")
@@ -1371,11 +1316,331 @@ if(WIN32)
                "#endif\n")
 
         set(STANDALONE_SOURCES
-            "${STANDALONE_ROOT}/main.cpp"
+            "${STANDALONE_ROOT}/qt/qt_main.cpp"
+            "${STANDALONE_ROOT}/qt/qt_early_startup.cpp"
+            "${STANDALONE_ROOT}/qt/qt_crash_integration.cpp"
+            "${STANDALONE_ROOT}/qt/bridge/ui_dispatcher.cpp"
+            "${STANDALONE_ROOT}/qt/qt_shell_application.cpp"
+            "${STANDALONE_ROOT}/qt/qt_main_window.cpp"
+            "${STANDALONE_ROOT}/qt/qt_startup_orchestrator.cpp"
+            "${STANDALONE_ROOT}/qt/qt_single_instance.cpp"
+            "${STANDALONE_ROOT}/qt/qt_eventloop_monitor.cpp"
+            "${STANDALONE_ROOT}/qt/qt_session_bridge.cpp"
+            "${STANDALONE_ROOT}/qt/qt_eventbus_bridge.cpp"
+            "${STANDALONE_ROOT}/qt/theme/aida_palette.cpp"
+            "${STANDALONE_ROOT}/qt/theme/aida_stylesheet.cpp"
+            "${STANDALONE_ROOT}/qt/theme/aida_proxy_style.cpp"
+            "${STANDALONE_ROOT}/qt/theme/aida_icons.cpp"
+            "${STANDALONE_ROOT}/qt/theme/aida_fonts.cpp"
+            "${STANDALONE_ROOT}/qt/theme/aida_motion.cpp"
+            "${STANDALONE_ROOT}/qt/theme/aida_theme_controller.cpp"
+            "${STANDALONE_ROOT}/qt/theme/disasm_theme_tokens.cpp"
+            "${STANDALONE_ROOT}/qt/widgets/aida_badge.cpp"
+            "${STANDALONE_ROOT}/qt/widgets/aida_button.cpp"
+            "${STANDALONE_ROOT}/qt/widgets/aida_card.cpp"
+            "${STANDALONE_ROOT}/qt/widgets/aida_chip.cpp"
+            "${STANDALONE_ROOT}/qt/widgets/aida_copy_button.cpp"
+            "${STANDALONE_ROOT}/qt/widgets/aida_headers.cpp"
+            "${STANDALONE_ROOT}/qt/widgets/aida_kbd_chip.cpp"
+            "${STANDALONE_ROOT}/qt/widgets/aida_line_edit.cpp"
+            "${STANDALONE_ROOT}/qt/widgets/aida_notice.cpp"
+            "${STANDALONE_ROOT}/qt/widgets/aida_pill.cpp"
+            "${STANDALONE_ROOT}/qt/widgets/aida_progress.cpp"
+            "${STANDALONE_ROOT}/qt/widgets/aida_property_row.cpp"
+            "${STANDALONE_ROOT}/qt/widgets/aida_search_field.cpp"
+            "${STANDALONE_ROOT}/qt/widgets/aida_state_view.cpp"
+            "${STANDALONE_ROOT}/qt/widgets/aida_status.cpp"
+            "${STANDALONE_ROOT}/qt/widgets/aida_toggle.cpp"
+            "${STANDALONE_ROOT}/qt/widgets/aida_tool_button.cpp"
+            "${STANDALONE_ROOT}/qt/registry/qt_view_registry.cpp"
+            "${STANDALONE_ROOT}/qt/registry/view_visibility.cpp"
+            "${STANDALONE_ROOT}/qt/registry/surface_state.cpp"
+            "${STANDALONE_ROOT}/qt/docking/dock_host.cpp"
+            "${STANDALONE_ROOT}/qt/docking/preset_recipes.cpp"
+            "${STANDALONE_ROOT}/qt/docking/hub_dock.cpp"
+            "${STANDALONE_ROOT}/qt/docking/view_placeholder.cpp"
+            "${STANDALONE_ROOT}/qt/layout/layout_container.cpp"
+            "${STANDALONE_ROOT}/qt/layout/workspace_operations.cpp"
+            "${STANDALONE_ROOT}/qt/layout/workspace_persistence.cpp"
+            "${STANDALONE_ROOT}/qt/layout/monitor_rehome.cpp"
+            "${STANDALONE_ROOT}/qt/bridge/action_bridge.cpp"
+            "${STANDALONE_ROOT}/qt/bridge/interaction_context_provider.cpp"
+            "${STANDALONE_ROOT}/qt/bridge/shortcut_bridge.cpp"
+            "${STANDALONE_ROOT}/qt/bridge/menu_bridge.cpp"
+            "${STANDALONE_ROOT}/qt/bridge/settings_bridge.cpp"
+            "${STANDALONE_ROOT}/qt/bridge/clipboard.cpp"
+            "${STANDALONE_ROOT}/qt/bridge/aida_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/bridge/dialogs.cpp"
+            "${STANDALONE_ROOT}/qt/analysis_bridge/disasm_workspace_model.cpp"
+            "${STANDALONE_ROOT}/qt/analysis_bridge/gui_post.cpp"
+            "${STANDALONE_ROOT}/qt/analysis_bridge/pseudocode_session.cpp"
+            "${STANDALONE_ROOT}/qt/analysis_bridge/revision_poller.cpp"
+            "${STANDALONE_ROOT}/qt/disasm/aida_disasm_view.cpp"
+            "${STANDALONE_ROOT}/qt/disasm/disasm_painter.cpp"
+            "${STANDALONE_ROOT}/qt/disasm/disasm_row_cache.cpp"
+            "${STANDALONE_ROOT}/qt/disasm/disasm_toolbar.cpp"
+            "${STANDALONE_ROOT}/qt/disasm/dialogs/disasm_comment_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/disasm/dialogs/disasm_rebase_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/disasm/dialogs/disasm_rename_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/disasm/dialogs/disasm_xref_popup.cpp"
+            "${STANDALONE_ROOT}/qt/disasm/dialogs/static_patch_review_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/pseudocode/aida_pseudocode_view.cpp"
+            "${STANDALONE_ROOT}/qt/pseudocode/local_rename_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/pseudocode/pseudocode_lines_widget.cpp"
+            "${STANDALONE_ROOT}/qt/graph/aida_cfg_view.cpp"
+            "${STANDALONE_ROOT}/qt/graph/aida_workspace_graph_view.cpp"
+            "${STANDALONE_ROOT}/qt/graph/cfg_block_item.cpp"
+            "${STANDALONE_ROOT}/qt/graph/cfg_edge_layer_item.cpp"
+            "${STANDALONE_ROOT}/qt/graph/cfg_minimap.cpp"
+            "${STANDALONE_ROOT}/qt/graph/cfg_scene_controller.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/analysis_context_menu_qt.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_analysis_bridge.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_analysis_domain_install.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_analysis_factories.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_analysis_host_hooks.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_analysis_list_model.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_analysis_list_view.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_analysis_menu_builder.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_binary_map_canvas.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_binary_map_dialogs.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_binary_map_heatmap.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_binary_map_list_model.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_binary_map_menus.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_binary_map_shared.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_binary_map_strip.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_binary_map_view.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_declaration_review_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_decrypt_oracle_view.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_dissector_dialogs.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_dissector_models.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_functions_model.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_functions_panel_widget.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_fuzzer_canvas.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_fuzzer_model.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_fuzzer_view.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_initial_analysis_controller.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_initial_analysis_dialogs.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_integrity_hunter_view.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_proximity_model.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_relationship_views.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_revision_poller.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_segment_registers_model.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_session_ui_hooks.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_source_reconstruct_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_stealth_view.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_struct_dissector_menus.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_struct_dissector_view.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_struct_recon_view.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_types_catalog_menu.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_types_catalog_model.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_types_catalog_view.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_workspace_context.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_write_review_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_xref_db_view.cpp"
+            "${STANDALONE_ROOT}/qt/analysis/qt_xref_model.cpp"
+            "${STANDALONE_ROOT}/qt/workbench/qt_recent_view.cpp"
+            "${STANDALONE_ROOT}/qt/workbench/qt_sessions_model.cpp"
+            "${STANDALONE_ROOT}/qt/workbench/qt_sessions_view.cpp"
+            "${STANDALONE_ROOT}/qt/workbench/qt_start_center_view.cpp"
+            "${STANDALONE_ROOT}/qt/workbench/qt_workbench_diff_view.cpp"
+            "${STANDALONE_ROOT}/qt/workbench/qt_workbench_inspector_view.cpp"
+            "${STANDALONE_ROOT}/qt/workbench/qt_workbench_navigator_view.cpp"
+            "${STANDALONE_ROOT}/qt/boot/aida_boot_screen.cpp"
+            "${STANDALONE_ROOT}/qt/chrome/aida_activity_rail.cpp"
+            "${STANDALONE_ROOT}/qt/chrome/aida_chrome_composer.cpp"
+            "${STANDALONE_ROOT}/qt/chrome/aida_exit_review.cpp"
+            "${STANDALONE_ROOT}/qt/chrome/aida_legacy_chrome_bridge.cpp"
+            "${STANDALONE_ROOT}/qt/chrome/aida_status_bar.cpp"
+            "${STANDALONE_ROOT}/qt/chrome/aida_theme_catalog.cpp"
+            "${STANDALONE_ROOT}/qt/chrome/aida_theme_picker.cpp"
+            "${STANDALONE_ROOT}/qt/chrome/aida_title_row.cpp"
+            "${STANDALONE_ROOT}/qt/chrome/aida_toast.cpp"
+            "${STANDALONE_ROOT}/qt/dialogs/aida_chat_select_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/dialogs/aida_driver_status_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/dialogs/aida_process_attach_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/dialogs/aida_shortcuts_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/dialogs/aida_theme_editor.cpp"
+            "${STANDALONE_ROOT}/qt/dialogs/aida_workspace_dialogs.cpp"
+            "${STANDALONE_ROOT}/qt/documents/aida_document_model.cpp"
+            "${STANDALONE_ROOT}/qt/documents/aida_document_controller.cpp"
+            "${STANDALONE_ROOT}/qt/documents/aida_document_domain.cpp"
+            "${STANDALONE_ROOT}/qt/editor/syntax_roles.cpp"
+            "${STANDALONE_ROOT}/qt/editor/aida_code_document.cpp"
+            "${STANDALONE_ROOT}/qt/editor/aida_code_editor.cpp"
+            "${STANDALONE_ROOT}/qt/editor/aida_code_group_host.cpp"
+            "${STANDALONE_ROOT}/qt/editor/aida_hex_document.cpp"
+            "${STANDALONE_ROOT}/qt/editor/aida_hex_editor.cpp"
+            "${STANDALONE_ROOT}/qt/editor/aida_image_view.cpp"
+            "${STANDALONE_ROOT}/qt/editor/code_editor_widget_adapter.cpp"
+            "${STANDALONE_ROOT}/qt/editor/hex_view_adapter.cpp"
+            "${STANDALONE_ROOT}/qt/explorer/aida_explorer_model.cpp"
+            "${STANDALONE_ROOT}/qt/explorer/aida_explorer_delegate.cpp"
+            "${STANDALONE_ROOT}/qt/explorer/aida_explorer_view.cpp"
+            "${STANDALONE_ROOT}/qt/explorer/exchange/open_dispatch.cpp"
+            "${STANDALONE_ROOT}/qt/overlays/aida_empty_state.cpp"
+            "${STANDALONE_ROOT}/qt/overlays/aida_loading_bridge.cpp"
+            "${STANDALONE_ROOT}/qt/overlays/aida_loading_overlay.cpp"
+            "${STANDALONE_ROOT}/qt/overlays/aida_no_target_overlay.cpp"
+            "${STANDALONE_ROOT}/qt/overlays/aida_overlay_host.cpp"
+            "${STANDALONE_ROOT}/qt/overlays/aida_quick_open.cpp"
+            "${STANDALONE_ROOT}/qt/overlays/aida_skeleton.cpp"
+            "${STANDALONE_ROOT}/qt/ai/qt_agent_manager_view.cpp"
+            "${STANDALONE_ROOT}/qt/ai/qt_agent_picker_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/ai/qt_ai_chat_composer.cpp"
+            "${STANDALONE_ROOT}/qt/ai/qt_ai_chat_delegate.cpp"
+            "${STANDALONE_ROOT}/qt/ai/qt_ai_chat_dialogs.cpp"
+            "${STANDALONE_ROOT}/qt/ai/qt_ai_chat_history.cpp"
+            "${STANDALONE_ROOT}/qt/ai/qt_ai_chat_model.cpp"
+            "${STANDALONE_ROOT}/qt/ai/qt_ai_chat_pills.cpp"
+            "${STANDALONE_ROOT}/qt/ai/qt_ai_chat_view.cpp"
+            "${STANDALONE_ROOT}/qt/ai/qt_ai_domain.cpp"
+            "${STANDALONE_ROOT}/qt/ai/qt_ai_evidence_view.cpp"
+            "${STANDALONE_ROOT}/qt/ai/qt_chat_inject.cpp"
+            "${STANDALONE_ROOT}/qt/ai/qt_command_palette.cpp"
+            "${STANDALONE_ROOT}/qt/ai/qt_provider_view.cpp"
+            "${STANDALONE_ROOT}/qt/ai/qt_skill_manager_view.cpp"
+            "${STANDALONE_ROOT}/qt/ai/qt_tool_approval.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/bookmarks_pane.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/breakpoints_pane.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/call_stack_pane.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/cpu_pane.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/debugger_action_bridge.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/debugger_cfg_pane.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/debugger_domain.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/debugger_models.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/debugger_mutation_queue.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/debugger_pane_base.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/debugger_run_toolbar.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/debugger_selection_bridge.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/debugger_session_controller.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/debugger_status_strip.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/dialogs/breakpoint_edit_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/dialogs/change_protection_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/dialogs/code_caves_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/dialogs/confirm_dialogs.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/dialogs/register_edit_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/dialogs/spawn_target_dialog_qt.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/dialogs/stage_patch_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/disasm_slice_widget.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/handles_pane.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/memory_map_pane.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/modules_pane.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/patches_pane.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/rflags_chips_widget.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/seh_pane.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/source_pane.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/stack_quad_widget.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/strings_pane.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/threads_pane.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/trace_pane.cpp"
+            "${STANDALONE_ROOT}/qt/debugger/watches_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/burp/cookie_jar_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/burp/logger_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/burp/project_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/burp/scope_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/burp/site_map_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/burp/upstream_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/monitor/bandwidth_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/monitor/capture_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/monitor/connections_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/monitor/dns_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/monitor/filters_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/monitor/intercept_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/monitor/keylog_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/monitor/pcap_export_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/monitor/proxy_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/network_domain_install.cpp"
+            "${STANDALONE_ROOT}/qt/network/network_hub_widget.cpp"
+            "${STANDALONE_ROOT}/qt/network/network_pane_base.cpp"
+            "${STANDALONE_ROOT}/qt/network/network_pane_factory.cpp"
+            "${STANDALONE_ROOT}/qt/network/shared/event_bus_bridge.cpp"
+            "${STANDALONE_ROOT}/qt/network/shared/exchange_context_menu.cpp"
+            "${STANDALONE_ROOT}/qt/network/shared/exchange_review_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/network/shared/http_highlighter.cpp"
+            "${STANDALONE_ROOT}/qt/network/shared/monitor_bridge.cpp"
+            "${STANDALONE_ROOT}/qt/network/shared/network_artifact_service.cpp"
+            "${STANDALONE_ROOT}/qt/network/shared/network_format.cpp"
+            "${STANDALONE_ROOT}/qt/network/shared/pcap_serialize.cpp"
+            "${STANDALONE_ROOT}/qt/network/burp_operation.cpp"
+            "${STANDALONE_ROOT}/qt/network/burp_review_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/network/reviewed_context_banner.cpp"
+            "${STANDALONE_ROOT}/qt/network/bounded_plain_text_edit.cpp"
+            "${STANDALONE_ROOT}/qt/network/network_attack_factory.cpp"
+            "${STANDALONE_ROOT}/qt/network/intruder/intruder_view.cpp"
+            "${STANDALONE_ROOT}/qt/network/repeater/repeater_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/sequencer/sequencer_view.cpp"
+            "${STANDALONE_ROOT}/qt/network/comparer/comparer_view.cpp"
+            "${STANDALONE_ROOT}/qt/network/comparer/diff_viewer.cpp"
+            "${STANDALONE_ROOT}/qt/network/jwt_lab/jwt_lab_view.cpp"
+            "${STANDALONE_ROOT}/qt/network/match_replace/match_replace_view.cpp"
+            "${STANDALONE_ROOT}/qt/network/session_handler/session_handler_view.cpp"
+            "${STANDALONE_ROOT}/qt/network/collaborator/collaborator_view.cpp"
+            "${STANDALONE_ROOT}/qt/network/websocket/ws_frame_store.cpp"
+            "${STANDALONE_ROOT}/qt/network/websocket/ws_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/decoder/decoder_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/scripting/scripting_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/fuzzer/fuzzer_controller.cpp"
+            "${STANDALONE_ROOT}/qt/network/fuzzer/fuzzer_pane.cpp"
+            "${STANDALONE_ROOT}/qt/network/offensive/offensive_pane.cpp"
+            "${STANDALONE_ROOT}/qt/net/net_editors_install.cpp"
+            "${STANDALONE_ROOT}/qt/net/qt_api_view.cpp"
+            "${STANDALONE_ROOT}/qt/net/qt_browser_launcher_view.cpp"
+            "${STANDALONE_ROOT}/qt/net/qt_csp_view.cpp"
+            "${STANDALONE_ROOT}/qt/net/qt_h2_editor_view.cpp"
+            "${STANDALONE_ROOT}/qt/net/qt_headless_browser_view.cpp"
+            "${STANDALONE_ROOT}/qt/net/qt_human_request_editor.cpp"
+            "${STANDALONE_ROOT}/qt/net/qt_recon_view.cpp"
+            "${STANDALONE_ROOT}/qt/net/qt_report_view.cpp"
+            "${STANDALONE_ROOT}/qt/net/qt_scanner_new_audit_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/net/qt_scanner_view.cpp"
+            "${STANDALONE_ROOT}/qt/net/qt_ws_editor_view.cpp"
+            "${STANDALONE_ROOT}/qt/programming/aida_language_views.cpp"
+            "${STANDALONE_ROOT}/qt/programming/aida_output_pane.cpp"
+            "${STANDALONE_ROOT}/qt/programming/aida_programming_domain.cpp"
+            "${STANDALONE_ROOT}/qt/programming/aida_programming_tasks.cpp"
+            "${STANDALONE_ROOT}/qt/programming/aida_task_center_view.cpp"
+            "${STANDALONE_ROOT}/qt/programming/aida_terminal_view.cpp"
+            "${STANDALONE_ROOT}/qt/programming/aida_workspace_search_view.cpp"
+            "${STANDALONE_ROOT}/qt/programming/programming_host_hooks.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/address_item_delegate.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/address_list_model.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/address_list_view.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/aob_byte_grid_widget.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/aob_controller.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/aob_saved_model.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/aob_widget.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/chain_diagram_widget.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/crypto_controller.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/crypto_hits_model.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/crypto_reference_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/crypto_widget.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/diff_detail_widget.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/diff_table_model.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/memory_interaction_bridge.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/pointer_chain_model.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/pointer_controller.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/pointer_widget.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/qt_scanner_domain.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/scan_hub_controller.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/scan_hub_widget.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/scan_result_delegate.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/scan_results_model.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/scan_results_view.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/scanner_context_menus.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/scanner_controller.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/scanner_dialogs.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/snapshot_controller.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/snapshot_timeline_widget.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/snapshot_widget.cpp"
+            "${STANDALONE_ROOT}/qt/scanner/value_scan_widget.cpp"
+            "${STANDALONE_ROOT}/qt/auth/qt_auth_oauth_dialog.cpp"
+            "${STANDALONE_ROOT}/qt/auth/qt_auth_view.cpp"
+            "${STANDALONE_ROOT}/qt/mcp/qt_mcp_marketplace_view.cpp"
+            "${STANDALONE_ROOT}/qt/settings/qt_settings_editor_page.cpp"
+            "${STANDALONE_ROOT}/qt/settings/qt_settings_mcp_page.cpp"
+            "${STANDALONE_ROOT}/qt/settings/qt_settings_view.cpp"
             "${STANDALONE_ROOT}/helpers/helpers.cpp"
-        
-            "${STANDALONE_ROOT}/helpers/imgui_dx11_d3dcompile_stub.cpp"
-            "${STANDALONE_ROOT}/helpers/icon_loodr.cpp"
+
             "${STANDALONE_ROOT}/helpers/file_browser.cpp"
             "${STANDALONE_ROOT}/helpers/embedded_assets.cpp"
             "${STANDALONE_ROOT}/core/mcp/mcp_standalone.cpp"
@@ -1412,8 +1677,8 @@ if(WIN32)
             "${STANDALONE_ROOT}/core/network/net_proto_tools_standalone.cpp"
             "${STANDALONE_ROOT}/core/network/net_security_tools_standalone.cpp"
             "${STANDALONE_ROOT}/core/tools/emulation_tools_standalone.cpp"
-            "${STANDALONE_ROOT}/core/editor/code_editor.cpp"
             "${STANDALONE_ROOT}/core/editor/programming_language_service.cpp"
+            "${STANDALONE_ROOT}/core/terminal/terminal_session.cpp"
             "${STANDALONE_ROOT}/core/analysis/analysis_budget.cpp"
             "${STANDALONE_ROOT}/core/analysis/analysis_resource_metrics.cpp"
             "${STANDALONE_ROOT}/core/analysis/analysis_scheduler.cpp"
@@ -1421,7 +1686,6 @@ if(WIN32)
             "${STANDALONE_ROOT}/core/analysis/fact_page_cache.cpp"
             "${STANDALONE_ROOT}/core/analysis/working_set_metrics.cpp"
             "${STANDALONE_ROOT}/core/analysis/working_set_governor.cpp"
-            "${STANDALONE_ROOT}/core/disasm/disasm_view.cpp"
             "${STANDALONE_ROOT}/core/disasm/ghidra_adapters/aida_pretty_xml_encode.cpp"
             "${STANDALONE_ROOT}/core/disasm/ghidra_adapters/aida_function_db.cpp"
             "${STANDALONE_ROOT}/core/disasm/ghidra_adapters/aida_arch_map.cpp"
@@ -1431,26 +1695,17 @@ if(WIN32)
             "${STANDALONE_ROOT}/core/disasm/ghidra_adapters/aida_scope.cpp"
             "${STANDALONE_ROOT}/core/disasm/ghidra_adapters/aida_architecture.cpp"
             "${STANDALONE_ROOT}/core/disasm/ghidra_adapters/aida_code_xml_parse.cpp"
-            "${STANDALONE_ROOT}/core/editor/hex_view.cpp"
-            "${STANDALONE_ROOT}/core/editor/image_view.cpp"
-            "${STANDALONE_ROOT}/core/ui/chat_render.cpp"
               "${STANDALONE_ROOT}/core/ui/application_action_registry.cpp"
               "${STANDALONE_ROOT}/core/ui/application_ui_runtime.cpp"
               "${STANDALONE_ROOT}/core/ui/analysis_context_menu.cpp"
-            "${STANDALONE_ROOT}/core/ui/application_view_registry.cpp"
+            "${STANDALONE_ROOT}/core/ui/chat_markdown.cpp"
             "${STANDALONE_ROOT}/core/ui/explorer_views.cpp"
-            "${STANDALONE_ROOT}/core/ui/output_views.cpp"
             "${STANDALONE_ROOT}/core/ui/programming_tasks.cpp"
-            "${STANDALONE_ROOT}/core/ui/programming_language_views.cpp"
             "${STANDALONE_ROOT}/core/ui/context_menu_contract.cpp"
-            "${STANDALONE_ROOT}/core/ui/context_menu_renderer.cpp"
-            "${STANDALONE_ROOT}/core/ui/design_system.cpp"
-            "${STANDALONE_ROOT}/core/ui/ide_shell.cpp"
+            "${STANDALONE_ROOT}/core/ui/embedded_resources.cpp"
             "${STANDALONE_ROOT}/core/ui/interaction_context.cpp"
             "${STANDALONE_ROOT}/core/ui/shortcut_resolver.cpp"
             "${STANDALONE_ROOT}/core/ui/task_center.cpp"
-            "${STANDALONE_ROOT}/core/ui/view_registry.cpp"
-            "${STANDALONE_ROOT}/core/ui/workspace_layout.cpp"
             "${STANDALONE_ROOT}/core/settings/settings_persistence_service.cpp"
             "${STANDALONE_ROOT}/core/settings/theme_transfer_service.cpp"
             "${STANDALONE_ROOT}/core/ai/conversation_evidence_store.cpp"
@@ -1478,7 +1733,6 @@ if(WIN32)
             "${STANDALONE_ROOT}/core/network/intercept/script_handoff.cpp"
             "${STANDALONE_ROOT}/core/network/burp/active_scanner.cpp"
             "${STANDALONE_ROOT}/core/network/burp/api_definition.cpp"
-            "${STANDALONE_ROOT}/core/network/burp/api_view.cpp"
             "${STANDALONE_ROOT}/core/network/burp/audit_http.cpp"
             "${STANDALONE_ROOT}/core/network/burp/audit_session.cpp"
             "${STANDALONE_ROOT}/core/network/burp/audit_session_mcp.cpp"
@@ -1486,7 +1740,6 @@ if(WIN32)
             "${STANDALONE_ROOT}/core/network/burp/auth_lab.cpp"
             "${STANDALONE_ROOT}/core/network/burp/bambda.cpp"
             "${STANDALONE_ROOT}/core/network/burp/browser_launch.cpp"
-            "${STANDALONE_ROOT}/core/network/burp/browser_view.cpp"
             "${STANDALONE_ROOT}/core/network/burp/burp_api_mcp.cpp"
             "${STANDALONE_ROOT}/core/network/burp/burp_auth_mcp.cpp"
             "${STANDALONE_ROOT}/core/network/burp/burp_bambda_mcp.cpp"
@@ -1511,9 +1764,7 @@ if(WIN32)
             "${STANDALONE_ROOT}/core/network/burp/burp_tech_mcp.cpp"
             "${STANDALONE_ROOT}/core/network/burp/burp_upstream_mcp.cpp"
             "${STANDALONE_ROOT}/core/network/burp/collaborator.cpp"
-            "${STANDALONE_ROOT}/core/network/burp/collaborator_view.cpp"
             "${STANDALONE_ROOT}/core/network/burp/comparer.cpp"
-            "${STANDALONE_ROOT}/core/network/burp/comparer_view.cpp"
             "${STANDALONE_ROOT}/core/network/burp/content_discovery.cpp"
             "${STANDALONE_ROOT}/core/network/burp/content_scanner.cpp"
             "${STANDALONE_ROOT}/core/network/burp/camoufox_bridge.cpp"
@@ -1523,7 +1774,6 @@ if(WIN32)
             "${STANDALONE_ROOT}/core/network/burp/crawl_audit.cpp"
             "${STANDALONE_ROOT}/core/network/burp/crawler.cpp"
             "${STANDALONE_ROOT}/core/network/burp/csp_analyzer.cpp"
-            "${STANDALONE_ROOT}/core/network/burp/csp_view.cpp"
             "${STANDALONE_ROOT}/core/network/burp/defensive_mcp.cpp"
             "${STANDALONE_ROOT}/core/network/burp/dom_xss_engine.cpp"
             "${STANDALONE_ROOT}/core/network/burp/dom_xss_mcp.cpp"
@@ -1531,29 +1781,21 @@ if(WIN32)
             "${STANDALONE_ROOT}/core/network/burp/extensions.cpp"
             "${STANDALONE_ROOT}/core/network/burp/findings_db.cpp"
             "${STANDALONE_ROOT}/core/network/burp/graphql.cpp"
-            "${STANDALONE_ROOT}/core/network/burp/headless_view.cpp"
-            "${STANDALONE_ROOT}/core/network/burp/graphql_view.cpp"
             "${STANDALONE_ROOT}/core/network/burp/h2_editor.cpp"
-            "${STANDALONE_ROOT}/core/network/burp/h2_editor_view.cpp"
             "${STANDALONE_ROOT}/core/network/burp/insertion_points.cpp"
             "${STANDALONE_ROOT}/core/network/burp/intruder_engine.cpp"
             "${STANDALONE_ROOT}/core/network/burp/intruder_view.cpp"
             "${STANDALONE_ROOT}/core/network/burp/issue.cpp"
             "${STANDALONE_ROOT}/core/network/burp/jwt_lab.cpp"
-            "${STANDALONE_ROOT}/core/network/burp/jwt_lab_view.cpp"
             "${STANDALONE_ROOT}/core/network/burp/match_replace.cpp"
             "${STANDALONE_ROOT}/core/network/burp/match_replace_view.cpp"
             "${STANDALONE_ROOT}/core/network/burp/param_miner.cpp"
             "${STANDALONE_ROOT}/core/network/burp/passive_scanner.cpp"
             "${STANDALONE_ROOT}/core/network/burp/payload_library.cpp"
             "${STANDALONE_ROOT}/core/network/burp/project.cpp"
-            "${STANDALONE_ROOT}/core/network/burp/project_view.cpp"
-            "${STANDALONE_ROOT}/core/network/burp/recon_view.cpp"
             "${STANDALONE_ROOT}/core/network/burp/report_generator.cpp"
-            "${STANDALONE_ROOT}/core/network/burp/report_view.cpp"
             "${STANDALONE_ROOT}/core/network/burp/scan_orchestrator.cpp"
             "${STANDALONE_ROOT}/core/network/burp/scanner_module.cpp"
-            "${STANDALONE_ROOT}/core/network/burp/scanner_view.cpp"
             "${STANDALONE_ROOT}/core/network/burp/scope.cpp"
             "${STANDALONE_ROOT}/core/network/burp/security_headers.cpp"
             "${STANDALONE_ROOT}/core/network/burp/sequencer.cpp"
@@ -1565,11 +1807,9 @@ if(WIN32)
             "${STANDALONE_ROOT}/core/network/burp/tech_fingerprint.cpp"
             "${STANDALONE_ROOT}/core/network/burp/tls_analyzer.cpp"
             "${STANDALONE_ROOT}/core/network/burp/upstream_chain.cpp"
-            "${STANDALONE_ROOT}/core/network/burp/upstream_view.cpp"
             "${STANDALONE_ROOT}/core/network/burp/vuln_taxonomy.cpp"
             "${STANDALONE_ROOT}/core/network/burp/web_report_mcp.cpp"
             "${STANDALONE_ROOT}/core/network/burp/ws_editor.cpp"
-            "${STANDALONE_ROOT}/core/network/burp/ws_editor_view.cpp"
             "${STANDALONE_ROOT}/core/network/burp/offensive/api_security_engine.cpp"
             "${STANDALONE_ROOT}/core/network/burp/offensive/auth_attack_engine.cpp"
             "${STANDALONE_ROOT}/core/network/burp/offensive/business_logic_engine.cpp"
@@ -1640,18 +1880,12 @@ if(WIN32)
             "${STANDALONE_ROOT}/core/tools/workflow_tools_standalone.cpp"
             "${STANDALONE_ROOT}/core/tools/script_engine.cpp"
             "${STANDALONE_ROOT}/core/scanner/memory_scanner.cpp"
-            "${STANDALONE_ROOT}/core/scanner/memory_scanner_view.cpp"
             "${STANDALONE_ROOT}/core/scanner/memory_interaction_context.cpp"
             "${STANDALONE_ROOT}/core/scanner/scanner_tools_standalone.cpp"
             "${STANDALONE_ROOT}/core/debugger/debugger_engine.cpp"
             "${STANDALONE_ROOT}/core/debugger/source_debug_service.cpp"
             "${STANDALONE_ROOT}/core/debugger/debugger_interaction_context.cpp"
             "${STANDALONE_ROOT}/core/debugger/debugger_view.cpp"
-            "${STANDALONE_ROOT}/core/disasm/pseudocode_view.cpp"
-            "${STANDALONE_ROOT}/core/analysis/struct_dissector_view.cpp"
-            "${STANDALONE_ROOT}/core/analysis/types_hub_view.cpp"
-            "${STANDALONE_ROOT}/core/analysis/struct_recon_view.cpp"
-            "${STANDALONE_ROOT}/core/analysis/fuzzer_view.cpp"
             "${STANDALONE_ROOT}/core/analysis/analysis_tools_standalone.cpp"
             "${STANDALONE_ROOT}/core/analysis/workspace/workspace_identity.cpp"
             "${STANDALONE_ROOT}/core/analysis/workspace/byte_provider.cpp"
@@ -1711,10 +1945,8 @@ if(WIN32)
             "${STANDALONE_ROOT}/core/auth/auth_codex.cpp"
             "${STANDALONE_ROOT}/core/auth/auth_copilot.cpp"
             "${STANDALONE_ROOT}/core/auth/auth_claude_code.cpp"
-            "${STANDALONE_ROOT}/core/auth/auth_view.cpp"
             "${STANDALONE_ROOT}/core/ai/provider_catalog.cpp"
             "${STANDALONE_ROOT}/core/ai/provider_transforms.cpp"
-            "${STANDALONE_ROOT}/core/ai/provider_view.cpp"
             "${STANDALONE_ROOT}/core/infra/event_bus.cpp"
             "${STANDALONE_ROOT}/core/infra/host_topology.cpp"
             "${STANDALONE_ROOT}/core/infra/allocator.cpp"
@@ -1729,9 +1961,12 @@ if(WIN32)
             "${STANDALONE_ROOT}/core/session/analysis_session.cpp"
             "${STANDALONE_ROOT}/core/tools/session_tools_standalone.cpp"
             "${STANDALONE_ROOT}/core/ai/command_registry.cpp"
-            "${STANDALONE_ROOT}/core/ai/settings_overlay.cpp"
+            "${STANDALONE_ROOT}/core/ai/conversation_history.cpp"
             "${STANDALONE_ROOT}/core/testlab/test_lab_registry.cpp"
-            "${STANDALONE_ROOT}/core/testlab/test_lab_view.cpp"
+            "${STANDALONE_ROOT}/core/testlab/qt/test_lab_controller.cpp"
+            "${STANDALONE_ROOT}/core/testlab/qt/test_lab_widget.cpp"
+            "${STANDALONE_ROOT}/core/testlab/qt/test_all_controller.cpp"
+            "${STANDALONE_ROOT}/core/testlab/qt/test_all_dialog.cpp"
             "${STANDALONE_ROOT}/core/testlab/test_lab_features_memory.cpp"
             "${STANDALONE_ROOT}/core/testlab/test_lab_features_thread.cpp"
             "${STANDALONE_ROOT}/core/testlab/test_lab_features_remote.cpp"
@@ -1819,27 +2054,14 @@ if(WIN32)
                 COMPILE_OPTIONS "$<$<COMPILE_LANGUAGE:C>:/wd4146>;$<$<COMPILE_LANGUAGE:C>:/wd4244>;$<$<COMPILE_LANGUAGE:C>:/wd4267>;$<$<COMPILE_LANGUAGE:C>:/wd4996>"
         )
 
-        set(IMGUI_SOURCES
-            "${STANDALONE_ROOT}/core/ui/imgui_capability_guard.cpp"
-            "${imgui_SOURCE_DIR}/imgui.cpp"
-            "${imgui_SOURCE_DIR}/imgui_draw.cpp"
-            "${imgui_SOURCE_DIR}/imgui_tables.cpp"
-            "${imgui_SOURCE_DIR}/imgui_widgets.cpp"
-            "${imgui_SOURCE_DIR}/backends/imgui_impl_dx11.cpp"
-            "${imgui_SOURCE_DIR}/backends/imgui_impl_win32.cpp"
-        )
-
         set(STANDALONE_ASM driver/syscall.asm)
         set_source_files_properties(${STANDALONE_ASM} PROPERTIES LANGUAGE ASM_MASM)
         add_library(AiDAStandalone_asm OBJECT ${STANDALONE_ASM})
 
         configure_file(
-            "${STANDALONE_ROOT}/resources/aida_embedded.rc.in"
-            "${CMAKE_BINARY_DIR}/aida_embedded.rc"
+            "${STANDALONE_ROOT}/../resources/aida_ghidra.qrc.in"
+            "${CMAKE_BINARY_DIR}/aida_ghidra.qrc"
             @ONLY
-        )
-        set_source_files_properties("${CMAKE_BINARY_DIR}/aida_embedded.rc" PROPERTIES
-            GENERATED TRUE
         )
 
         set(STANDALONE_GUEST_AGENT_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/src/standalone/guest_agent")
@@ -1869,7 +2091,7 @@ if(WIN32)
         set_target_properties(AiDAGuestAgent PROPERTIES
             CXX_STANDARD 17
             CXX_STANDARD_REQUIRED YES
-            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+            MSVC_RUNTIME_LIBRARY "MultiThreadedDLL$<$<CONFIG:Debug>:Debug>"
             OUTPUT_NAME "AiDAGuestAgent"
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Release"
             RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/Debug"
@@ -1897,7 +2119,7 @@ if(WIN32)
         set_target_properties(AIDADialogBroker PROPERTIES
             CXX_STANDARD 17
             CXX_STANDARD_REQUIRED YES
-            MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>"
+            MSVC_RUNTIME_LIBRARY "MultiThreadedDLL$<$<CONFIG:Debug>:Debug>"
             OUTPUT_NAME "AIDADialogBroker"
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/Release"
             RUNTIME_OUTPUT_DIRECTORY_DEBUG "${CMAKE_BINARY_DIR}/Debug"
@@ -1907,9 +2129,13 @@ if(WIN32)
 
         add_executable(AiDAStandalone WIN32
             ${STANDALONE_SOURCES}
-            ${IMGUI_SOURCES}
             $<TARGET_OBJECTS:AiDAStandalone_asm>
-            "${CMAKE_BINARY_DIR}/aida_embedded.rc"
+        )
+        qt6_add_resources(_aida_ghidra_qrc_sources "${CMAKE_BINARY_DIR}/aida_ghidra.qrc")
+        qt6_add_resources(_aida_shell_qrc_sources "${STANDALONE_ROOT}/../resources/aida.qrc")
+        target_sources(AiDAStandalone PRIVATE
+            ${_aida_ghidra_qrc_sources}
+            ${_aida_shell_qrc_sources}
         )
         set_source_files_properties("${STANDALONE_ROOT}/core/runtime/kernel_symbols.cpp"
             PROPERTIES COMPILE_OPTIONS "/std:c++20" SKIP_PRECOMPILE_HEADERS ON)
@@ -1947,9 +2173,6 @@ if(WIN32)
             "${STANDALONE_ROOT}/core/settings"
             "${STANDALONE_ROOT}/core/testlab"
             "${STANDALONE_ROOT}/core/diagnostics"
-            "${CMAKE_BINARY_DIR}/_imgui_wrapper"
-            "${imgui_SOURCE_DIR}"
-            "${imgui_SOURCE_DIR}/backends"
             "${lua_src_SOURCE_DIR}"
             "${sol2_SOURCE_DIR}/include"
             "${CMAKE_CURRENT_SOURCE_DIR}/libs/cpp-httplib"
@@ -1984,13 +2207,11 @@ if(WIN32)
             CPPHTTPLIB_OPENSSL_SUPPORT
             NOMINMAX
             WIN32_LEAN_AND_MEAN
-            IMGUI_ENABLE_STB_TRUETYPE
             UNICODE
             _UNICODE
             SOL_ALL_SAFETIES_ON=1
             GHIDRA_SPECS_DIR=${GHIDRA_SPECS_OUTPUT_DIR}
             AIDA_STANDALONE
-            AIDA_IMGUI_SOURCE_SHA256=${AIDA_IMGUI_SOURCE_SHA256}
         )
         if(NOT AIDA_DISABLE_LEGACY_DRIVER_MAPPER)
             target_compile_definitions(AiDAStandalone PRIVATE AIDA_LEGACY_DRIVER_MAPPER_AVAILABLE)
@@ -2010,7 +2231,7 @@ if(WIN32)
         enable_testing()
         aida_c03_register_safe_headless_targets(AiDAStandalone)
 
-        aida_use_static_msvc_runtime(
+        aida_use_dynamic_msvc_runtime(
             AiDAStandalone
             AiDAStandalone_asm
             Zydis
@@ -2034,6 +2255,7 @@ if(WIN32)
             llhttp_static
             nghttp2_static
             lua54_static
+            qtadvanceddocking-qt6
         )
 
         target_precompile_headers(AiDAStandalone PRIVATE
@@ -2097,10 +2319,15 @@ if(WIN32)
             llhttp_static
             nghttp2_static
             lua54_static
-            aida_openssl_ssl_mt
-            aida_openssl_crypto_mt
-            d3d11
-            dxgi
+            aida_openssl_ssl
+            aida_openssl_crypto
+            Qt6::Core
+            Qt6::Gui
+            Qt6::Widgets
+            Qt6::Network
+            Qt6::Svg
+            Qt6::Test
+            ads::qtadvanceddocking-qt6
             dwmapi
             ws2_32
             dnsapi
@@ -2147,6 +2374,8 @@ if(WIN32)
             COMPILE_PDB_OUTPUT_DIRECTORY_RELEASE "${CMAKE_BINARY_DIR}/Release"
             COMPILE_PDB_OUTPUT_DIRECTORY_RELWITHDEBINFO "${CMAKE_BINARY_DIR}/RelWithDebInfo"
         )
+
+        aida_qt6_stage_runtime(AiDAStandalone)
 
         option(AIDA_STANDALONE_STAGE_APPLOCAL_RUNTIME_DLLS "Stage app-local runtime DLLs beside AiDAStandalone.exe" ON)
         if(AIDA_STANDALONE_STAGE_APPLOCAL_RUNTIME_DLLS)
@@ -2243,7 +2472,7 @@ if(WIN32)
             /permissive-
         )
 
-        aida_use_static_msvc_runtime(AiDAParserProof)
+        aida_use_dynamic_msvc_runtime(AiDAParserProof)
 
         target_link_libraries(AiDAParserProof PRIVATE
             llhttp_static
@@ -2809,7 +3038,7 @@ if(WIN32)
         $<$<COMPILE_LANGUAGE:CXX>:/wd5240>
     )
 
-    aida_use_static_msvc_runtime(AiDA)
+    aida_use_dynamic_msvc_runtime(AiDA)
 
     target_precompile_headers(AiDA PRIVATE
         <nlohmann/json.hpp>
@@ -2868,8 +3097,8 @@ if(WIN32)
     endif()
 
     target_link_libraries(AiDA PRIVATE
-        aida_openssl_ssl_mt
-        aida_openssl_crypto_mt
+        aida_openssl_ssl
+        aida_openssl_crypto
         ws2_32
         crypt32
         Shlwapi

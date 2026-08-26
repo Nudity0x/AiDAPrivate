@@ -180,11 +180,15 @@ static void apply_region_filter(memory_scanner::scan_config_t& cfg, const std::s
 
 static json scan_summary_json(size_t limit) {
 	auto& st = memory_scanner::g_state;
-	std::lock_guard<std::mutex> lk(st.results_mutex);
+	std::shared_ptr<const std::vector<memory_scanner::scan_result_t>> results;
+	{
+		std::lock_guard<std::mutex> lk(st.results_mutex);
+		results = st.results;
+	}
 	json arr = json::array();
-	const size_t n = std::min(st.results.size(), limit);
+	const size_t n = results ? std::min(results->size(), limit) : 0;
 	for (size_t i = 0; i < n; ++i) {
-		const auto& r = st.results[i];
+		const auto& r = (*results)[i];
 		json obj;
 		obj["address"] = sa_format_address(r.address);
 		obj["value"] = memory_scanner::format_value(r.current_value, st.config.value_type);
@@ -495,7 +499,7 @@ static json scanner_activity_json() {
 	state["pointer_progress"] = st.pointer_progress.load();
 	{
 		std::lock_guard<std::mutex> lk(st.results_mutex);
-		state["scan_results"] = st.results.size();
+		state["scan_results"] = st.results ? st.results->size() : 0;
 		state["total_found"] = st.total_found;
 	}
 	{
@@ -869,12 +873,16 @@ static json struct_snapshot_json(int struct_index, const struct_dissector::struc
 
 static std::string results_to_json(size_t limit = 100) {
 	auto& st = memory_scanner::g_state;
-	std::lock_guard<std::mutex> lk(st.results_mutex);
+	std::shared_ptr<const std::vector<memory_scanner::scan_result_t>> results;
+	{
+		std::lock_guard<std::mutex> lk(st.results_mutex);
+		results = st.results;
+	}
 
 	json arr = json::array();
-	size_t n = std::min(st.results.size(), limit);
+	size_t n = results ? std::min(results->size(), limit) : 0;
 	for (size_t i = 0; i < n; ++i) {
-		auto& r = st.results[i];
+		auto& r = (*results)[i];
 		json obj;
 		char buf[20];
 		snprintf(buf, sizeof(buf), "0x%" PRIX64, r.address);

@@ -6282,7 +6282,7 @@ static mcp_lease_registry_snapshot_t mcp_lease_registry_acquire(const mcp_lease_
     }
 
     mcp_lease_log_event("MCP-LEASE-ACQUIRE", record, "acquire", true, now);
-    aida::diagnostics::metadata_ring::emit(
+    aida::diagnostics::metadata_ring::emit_breadcrumb(
         aida::diagnostics::metadata_ring::breadcrumb_category_t::mcp_lease,
         "mcp_lease_acquired", nullptr, false);
     mcp_lease_registry_snapshot_t snap;
@@ -13255,7 +13255,7 @@ tool_result_t server_t::call_registered_tool(const std::string& name, const json
         timeout_resolution.action.c_str(),
         queue_owner.c_str(),
         metrics.lane.c_str());
-    aida::diagnostics::metadata_ring::emit(
+    aida::diagnostics::metadata_ring::emit_breadcrumb(
         aida::diagnostics::metadata_ring::breadcrumb_category_t::mcp_tool_call,
         "mcp_tool_admitted", nullptr, false);
 
@@ -16163,7 +16163,7 @@ void server_t::server_thread_func(int port)
             g_active_streams.load(std::memory_order_acquire),
             req.body.size(),
             request_connection_closed(req) ? 1 : 0);
-        aida::diagnostics::metadata_ring::emit(
+        aida::diagnostics::metadata_ring::emit_breadcrumb(
             aida::diagnostics::metadata_ring::breadcrumb_category_t::mcp_ingress,
             "mcp_request_entry", nullptr, false);
         return httplib::Server::HandlerResponse::Unhandled;

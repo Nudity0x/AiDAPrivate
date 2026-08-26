@@ -22,7 +22,6 @@
 #include <utility>
 #include <vector>
 
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -33,7 +32,6 @@
 #include "../infra/taskflow_runtime.hpp"
 #include "../infra/cancellation_watchdog.hpp"
 #include "../mcp/downstream_producer_governor.hpp"
-#endif
 
 namespace pdb_parser {
 
@@ -123,7 +121,6 @@ struct pdb_info_t {
 	bool loaded = false;
 };
 
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 
 typedef BOOL (WINAPI *fn_SymInitializeW)(HANDLE, PCWSTR, BOOL);
 typedef BOOL (WINAPI *fn_SymCleanup)(HANDLE);
@@ -3291,132 +3288,6 @@ inline bool parse_pdb_bounded(const std::string& pdb_path,
 	return false;
 }
 
-#else
-
-inline std::string& preview_last_error_text()
-{
-	static std::string value;
-	return value;
-}
-
-inline std::string last_error()
-{
-	return preview_last_error_text();
-}
-
-inline std::string dbghelp_load_diagnostic()
-{
-	return "Studio preview PDB provider";
-}
-
-inline bool dbghelp_is_quarantined()
-{
-	return false;
-}
-
-inline void quarantine_dbghelp_and_recycle()
-{
-	preview_last_error_text().clear();
-}
-
-inline bool parse_pdb(const std::string& pdb_path,
-	const std::string&, pdb_info_t& out, std::atomic<float>* progress = nullptr,
-	std::atomic<bool>* cancel = nullptr)
-{
-	if (cancel && cancel->load(std::memory_order_acquire)) {
-		preview_last_error_text() = "PDB import cancelled";
-		return false;
-	}
-	out = {};
-	out.file_path = pdb_path.empty() ? "AiDA_Target.pdb" : pdb_path;
-	out.module_name = "AiDA_Target";
-	out.symbols = {
-		{"WinMain", 0x1180, 0x1001, 0x13A, true},
-		{"AnalyzeImage", 0x12C0, 0x1002, 0x1D4, true},
-		{"DispatchCommand", 0x14A0, 0x1003, 0xF8, true}
-	};
-	struct_def_t header;
-	header.name = "IMAGE_RUNTIME_CONTEXT";
-	header.size = 0x30;
-	header.type_index = 0x2001;
-	header.members = {
-		{"image_base", "uint64_t", 0x00, 8, 0x21, -1, -1, false, 0, false, 0},
-		{"entry_point", "uint64_t", 0x08, 8, 0x21, -1, -1, false, 0, false, 0},
-		{"image_size", "uint32_t", 0x10, 4, 0x22, -1, -1, false, 0, false, 0},
-		{"machine", "uint16_t", 0x14, 2, 0x23, -1, -1, false, 0, false, 0},
-		{"section_count", "uint16_t", 0x16, 2, 0x23, -1, -1, false, 0, false, 0},
-		{"flags", "uint32_t", 0x18, 4, 0x22, -1, -1, false, 0, false, 0},
-		{"module_name", "char", 0x20, 16, 0x24, -1, -1, false, 0, true, 16}
-	};
-	struct_def_t node;
-	node.name = "CONTROL_FLOW_NODE";
-	node.size = 0x28;
-	node.type_index = 0x2002;
-	node.members = {
-		{"address", "uint64_t", 0x00, 8, 0x21, -1, -1, false, 0, false, 0},
-		{"successors", "CONTROL_FLOW_NODE**", 0x08, 8, 0x25, -1, -1, true, 2, false, 0},
-		{"successor_count", "uint32_t", 0x10, 4, 0x22, -1, -1, false, 0, false, 0},
-		{"instruction_count", "uint32_t", 0x14, 4, 0x22, -1, -1, false, 0, false, 0},
-		{"flags", "uint64_t", 0x18, 8, 0x21, -1, -1, false, 0, false, 0},
-		{"confidence", "float", 0x20, 4, 0x26, -1, -1, false, 0, false, 0}
-	};
-	struct_def_t value;
-	value.name = "ANALYSIS_VALUE";
-	value.size = 8;
-	value.type_index = 0x2003;
-	value.is_union = true;
-	value.members = {
-		{"unsigned_value", "uint64_t", 0, 8, 0x21, -1, -1, false, 0, false, 0},
-		{"signed_value", "int64_t", 0, 8, 0x27, -1, -1, false, 0, false, 0},
-		{"pointer_value", "void*", 0, 8, 0x25, -1, -1, true, 1, false, 0},
-		{"double_value", "double", 0, 8, 0x28, -1, -1, false, 0, false, 0}
-	};
-	out.structs = {std::move(header), std::move(node), std::move(value)};
-	enum_def_t status;
-	status.name = "ANALYSIS_STATUS";
-	status.type_index = 0x3001;
-	status.members = {{"Pending", 0}, {"Running", 1}, {"Complete", 2}, {"Failed", 3}};
-	out.enums = {std::move(status)};
-	for (std::size_t index = 0; index < out.symbols.size(); ++index) {
-		out.symbol_by_name.emplace(out.symbols[index].name, index);
-		out.symbol_by_rva.emplace(out.symbols[index].rva, index);
-	}
-	for (std::size_t index = 0; index < out.structs.size(); ++index) {
-		out.struct_by_name.emplace(out.structs[index].name, index);
-		out.struct_by_ti.emplace(out.structs[index].type_index, index);
-	}
-	auto source_table = std::make_shared<source_line_table_t>();
-	source_table->generation = 1;
-	source_table->state = source_line_state_t::complete;
-	source_table->detail = "Deterministic Studio preview source-line fixture";
-	source_table->files = {{"C:/AiDA/Preview/sample.cpp", "sample.obj"}};
-	source_table->lines = {
-		{0x1180, 12, 0}, {0x1188, 13, 0}, {0x12C0, 28, 0},
-		{0x12D0, 29, 0}, {0x14A0, 47, 0}
-	};
-	for (size_t index = 0; index < source_table->lines.size(); ++index) {
-		const auto& line = source_table->lines[index];
-		source_table->line_by_rva.try_emplace(line.rva, index);
-		source_table->lines_by_file_line[
-			"c:/aida/preview/sample.cpp\n" + std::to_string(line.line)].push_back(index);
-	}
-	out.source_lines = std::shared_ptr<const source_line_table_t>(std::move(source_table));
-	out.loaded = true;
-	preview_last_error_text().clear();
-	if (progress)
-		progress->store(1.0f, std::memory_order_release);
-	return true;
-}
-
-inline bool parse_pdb_bounded(const std::string& pdb_path,
-	const std::string& symbol_search_path, pdb_info_t& out,
-	std::atomic<float>* progress = nullptr, std::atomic<bool>* cancel = nullptr,
-	uint32_t = 0)
-{
-	return parse_pdb(pdb_path, symbol_search_path, out, progress, cancel);
-}
-
-#endif
 
 inline std::string struct_to_cpp(const struct_def_t& def)
 {

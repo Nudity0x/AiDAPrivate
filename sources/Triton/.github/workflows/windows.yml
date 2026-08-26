@@ -1,0 +1,40 @@
+name: Tests on Windows
+
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        python-version: ['3.9', '3.10', '3.11', '3.12', '3.13', '3.14']
+    steps:
+      - name: Checkout Triton repository
+        uses: actions/checkout@v6
+
+      - name: Install Triton dependencies
+        uses: ./.github/actions/install-triton-deps/windows
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compile Triton
+        run: |
+          cmake -B build `
+                -DZ3_INTERFACE=ON `
+                -DZ3_INCLUDE_DIRS=${{ env.Z3_INCLUDE_DIRS }} `
+                -DZ3_LIBRARIES=${{ env.Z3_LIBRARIES }} `
+                -DLLVM_INTERFACE=OFF `
+                -DCMAKE_PREFIX_PATH=${{ env.LLVM_PATH }} `
+                -DBOOST_INTERFACE=OFF `
+                -DCAPSTONE_INCLUDE_DIRS=${{ env.CAPSTONE_INCLUDE_DIRS }} `
+                -DCAPSTONE_LIBRARIES=${{ env.CAPSTONE_LIBRARIES }}
+          cmake --build build --config Release --parallel
+          cmake --install build --config Release --prefix install
+        shell: pwsh
+
+      - name: Run tests
+        run: |
+          Copy-Item "${{ env.Z3_BIN_DIR }}\libz3.dll" "build\src\libtriton\Release\"
+          Copy-Item "${{ env.CAPSTONE_BIN_DIR }}\capstone.dll" "build\src\libtriton\Release\"
+          ctest --test-dir build --output-on-failure -C Release
+        shell: pwsh

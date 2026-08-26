@@ -20,10 +20,8 @@
 
 #include <nlohmann/json.hpp>
 
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 #include <Windows.h>
 #include <shlobj.h>
-#endif
 
 namespace aida::editor::programming_documents {
 
@@ -468,9 +466,6 @@ inline bool parse_record_metadata(const nlohmann::json& object, document_record_
 }
 
 inline std::filesystem::path storage_directory() {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    return {};
-#else
     wchar_t* appdata = nullptr;
     if (FAILED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr, &appdata)))
         return {};
@@ -480,7 +475,6 @@ inline std::filesystem::path storage_directory() {
     std::error_code ec;
     std::filesystem::create_directories(path, ec);
     return ec ? std::filesystem::path{} : path;
-#endif
 }
 
 inline std::filesystem::path manifest_path() {
@@ -518,11 +512,6 @@ inline operation_result_t read_bounded_file(const std::filesystem::path& path,
 
 inline operation_result_t atomic_exact_write(const std::filesystem::path& destination,
                                              std::string_view bytes) {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    static_cast<void>(destination);
-    static_cast<void>(bytes);
-    return {true, {}};
-#else
     if (destination.empty())
         return {false, "The recovery destination is unavailable."};
     std::error_code ec;
@@ -591,17 +580,10 @@ inline operation_result_t atomic_exact_write(const std::filesystem::path& destin
             std::to_string(error) + ")."};
     }
     return {true, {}, true};
-#endif
 }
 
 inline operation_result_t load_manifest(nlohmann::json& manifest,
                                         bool allow_previous = true) {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    static_cast<void>(allow_previous);
-    manifest = {{"schema", "aida.programming-recovery-manifest"},
-                {"version", journal_version}, {"entries", nlohmann::json::array()}};
-    return {true, {}};
-#else
     const auto current = manifest_path();
     if (current.empty())
         return {false, "The programming recovery directory is unavailable."};
@@ -637,14 +619,9 @@ inline operation_result_t load_manifest(nlohmann::json& manifest,
         return {true, {}};
     }
     return loaded;
-#endif
 }
 
 inline operation_result_t write_manifest(const nlohmann::json& manifest) {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    static_cast<void>(manifest);
-    return {true, {}};
-#else
     const auto current = manifest_path();
     if (current.empty())
         return {false, "The programming recovery directory is unavailable."};
@@ -671,7 +648,6 @@ inline operation_result_t write_manifest(const nlohmann::json& manifest) {
     if (raw.size() > maximum_manifest_bytes)
         return {false, "The recovery manifest exceeds its verified size limit."};
     return atomic_exact_write(current, raw);
-#endif
 }
 
 inline std::string journal_blob(const document_record_t& source) {
@@ -761,10 +737,6 @@ inline recovery_load_result_t load_journal_file(const std::string& filename,
 }
 
 inline operation_result_t commit(const document_record_t& source) {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    static_cast<void>(source);
-    return {true, {}};
-#else
     std::lock_guard<std::mutex> lock(storage_mutex());
     if (!source.dirty || source.document_id == 0 || source.revision == 0 ||
         source.content.size() > maximum_document_bytes)
@@ -880,16 +852,10 @@ inline operation_result_t commit(const document_record_t& source) {
         }
     }
     return {true, {}, true};
-#endif
 }
 
 inline operation_result_t migrate_legacy_snapshot(document_record_t identity,
                                                    const std::string& original_path = {}) {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    static_cast<void>(identity);
-    static_cast<void>(original_path);
-    return {true, {}};
-#else
     if (identity.canonical_path.empty() || identity.document_id == 0)
         return {true, {}};
     const auto directory = storage_directory();
@@ -936,16 +902,10 @@ inline operation_result_t migrate_legacy_snapshot(document_record_t identity,
     if (ec)
         return {true, "Legacy recovery was migrated, but the superseded snapshot could not be removed: " + ec.message()};
     return {true, "Legacy recovery snapshot migrated to the versioned journal."};
-#endif
 }
 
 inline recovery_reference_t probe(std::uint64_t document_id, const std::string& path) {
     recovery_reference_t result;
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    static_cast<void>(document_id);
-    static_cast<void>(path);
-    return result;
-#else
     std::lock_guard<std::mutex> lock(storage_mutex());
     nlohmann::json manifest;
     const auto loaded = load_manifest(manifest);
@@ -992,7 +952,6 @@ inline recovery_reference_t probe(std::uint64_t document_id, const std::string& 
         return result;
     }
     return result;
-#endif
 }
 
 inline recovery_load_result_t load(const recovery_reference_t& reference) {
@@ -1006,11 +965,6 @@ inline recovery_load_result_t load(const recovery_reference_t& reference) {
 
 inline operation_result_t discard(const recovery_reference_t& reference,
                                   std::uint64_t clean_revision = 0) {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    static_cast<void>(reference);
-    static_cast<void>(clean_revision);
-    return {true, {}};
-#else
     std::lock_guard<std::mutex> lock(storage_mutex());
     if (!reference.available)
         return {false, "No verified recovery journal is available."};
@@ -1072,16 +1026,10 @@ inline operation_result_t discard(const recovery_reference_t& reference,
     ec.clear();
     if (valid_journal_filename(previous)) std::filesystem::remove(directory / previous, ec);
     return {true, {}};
-#endif
 }
 
 inline operation_result_t seal_clean_outcome(document_record_t identity,
                                               std::uint64_t clean_revision) {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    static_cast<void>(identity);
-    static_cast<void>(clean_revision);
-    return {true, {}};
-#else
     if (identity.document_id == 0 || clean_revision == 0)
         return {false, "The clean programming-document outcome has no stable identity or revision."};
     identity.canonical_path = canonical_path(identity.canonical_path);
@@ -1133,7 +1081,6 @@ inline operation_result_t seal_clean_outcome(document_record_t identity,
     ec.clear();
     if (valid_journal_filename(previous)) std::filesystem::remove(directory / previous, ec);
     return {true, {}, true};
-#endif
 }
 
 inline std::string encode_session(const session_state_t& state) {

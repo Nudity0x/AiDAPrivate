@@ -1,10 +1,5 @@
 #pragma once
 
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-
-#include "../../preview/taskflow_runtime_preview.hpp"
-
-#else
 
 #include <algorithm>
 #include <array>
@@ -2760,4 +2755,3 @@ inline shutdown_guard_t g_shutdown_guard;
 
 }
 
-#endif

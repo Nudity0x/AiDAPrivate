@@ -2,7 +2,6 @@
 #include "test_lab_format.hpp"
 #include "../infra/executor.hpp"
 #include "../../../../driver/comm.h"
-#include "imgui/imgui.h"
 
 #include <Windows.h>
 #include <ws2tcpip.h>
@@ -1109,9 +1108,9 @@ namespace {
 		return false;
 	}
 
-	void render_inputs_empty(test_lab::state_t& s) {
+	void render_inputs_empty(test_lab::state_t& s, test_lab::input_form_t& form) {
 		(void)s;
-		ImGui::TextDisabled("no inputs");
+		form.note("no inputs");
 	}
 
 	void run_verify_network_capture(test_lab::state_t& s, test_lab::result_t& r) {

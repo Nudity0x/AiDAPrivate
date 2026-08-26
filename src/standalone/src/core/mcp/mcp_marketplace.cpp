@@ -21,6 +21,13 @@
 #include <httplib.h>
 #include <nlohmann/json.hpp>
 
+#include <QElapsedTimer>
+#include <QFileInfo>
+#include <QProcess>
+#include <QStandardPaths>
+#include <QString>
+#include <QStringList>
+
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -258,74 +265,112 @@ std::string launch_command_preview(const installed_server_t& srv)
 }
 
 
-static std::string run_process_capture(const std::string& cmd,
+static install_output_hook_t s_install_output_hook;
+static std::mutex              s_install_output_mtx;
+
+void set_install_output_hook(install_output_hook_t hook)
+{
+    std::lock_guard<std::mutex> lk(s_install_output_mtx);
+    s_install_output_hook = std::move(hook);
+}
+
+static void emit_install_output(const std::string& line)
+{
+    install_output_hook_t hook;
+    {
+        std::lock_guard<std::mutex> lk(s_install_output_mtx);
+        hook = s_install_output_hook;
+    }
+    if (hook)
+        hook(line);
+}
+
+static void feed_install_output_line(std::string& pending, const char* data, qsizetype size)
+{
+    for (qsizetype i = 0; i < size; ++i) {
+        const char c = data[i];
+        if (c == '\n') {
+            while (!pending.empty() && pending.back() == '\r')
+                pending.pop_back();
+            emit_install_output(pending);
+            pending.clear();
+        } else {
+            pending.push_back(c);
+        }
+    }
+}
+
+static std::string run_process_capture(const QString& program,
+                                       const QStringList& args,
                                        const std::string& working_dir,
                                        int timeout_ms = 60000)
 {
-    SECURITY_ATTRIBUTES sa{};
-    sa.nLength = sizeof(sa);
-    sa.bInheritHandle = TRUE;
-
-    HANDLE read_pipe = nullptr, write_pipe = nullptr;
-    if (!CreatePipe(&read_pipe, &write_pipe, &sa, 0))
-        return "";
-
-    SetHandleInformation(read_pipe, HANDLE_FLAG_INHERIT, 0);
-
-    STARTUPINFOA si{};
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES | STARTF_USESHOWWINDOW;
-    si.hStdOutput = write_pipe;
-    si.hStdError  = write_pipe;
-    si.hStdInput  = GetStdHandle(STD_INPUT_HANDLE);
-    si.wShowWindow = SW_HIDE;
-
-    PROCESS_INFORMATION pi{};
-    std::string cmd_copy = cmd;
-
-    BOOL ok = CreateProcessA(
-        nullptr, cmd_copy.data(), nullptr, nullptr, TRUE,
-        CREATE_NO_WINDOW, nullptr,
-        working_dir.empty() ? nullptr : working_dir.c_str(),
-        &si, &pi);
-
-    CloseHandle(write_pipe);
-
-    if (!ok) {
-        CloseHandle(read_pipe);
-        return "";
-    }
-
     std::string output;
-    char buf[4096];
-    DWORD bytes_read = 0;
-    auto start = std::chrono::steady_clock::now();
+    std::string pending_line;
+    QProcess process;
+    if (!working_dir.empty())
+        process.setWorkingDirectory(QString::fromStdString(working_dir));
+    process.setProcessChannelMode(QProcess::SeparateChannels);
+    diag::log_tagged_fmt("mcp_market", "install_spawn program='%s' argc=%d",
+        program.toStdString().c_str(), static_cast<int>(args.size()));
+    process.start(program, args);
+    if (!process.waitForStarted(10000)) {
+        const std::string err = "Failed to start " + program.toStdString() + ": "
+            + process.errorString().toStdString();
+        emit_install_output(err);
+        return err;
+    }
+    QElapsedTimer timer;
+    timer.start();
+    bool terminated = false;
     while (true) {
-        auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now() - start).count();
-        if (elapsed > timeout_ms) {
-            TerminateProcess(pi.hProcess, 1);
+        if (timer.elapsed() > timeout_ms) {
+            process.terminate();
+            if (!process.waitForFinished(3000)) {
+                process.kill();
+                process.waitForFinished(1000);
+            }
+            terminated = true;
+        }
+        bool progressed = false;
+        if (process.waitForReadyRead(50)) {
+            const QByteArray out = process.readAllStandardOutput();
+            const QByteArray err = process.readAllStandardError();
+            if (!out.isEmpty()) {
+                output.append(out.constData(), static_cast<size_t>(out.size()));
+                feed_install_output_line(pending_line, out.constData(), out.size());
+                progressed = true;
+            }
+            if (!err.isEmpty()) {
+                output.append(err.constData(), static_cast<size_t>(err.size()));
+                feed_install_output_line(pending_line, err.constData(), err.size());
+                progressed = true;
+            }
+        }
+        if (process.state() == QProcess::NotRunning && !progressed)
+            break;
+        if (process.state() == QProcess::NotRunning) {
+            const QByteArray out = process.readAllStandardOutput();
+            const QByteArray err = process.readAllStandardError();
+            if (!out.isEmpty()) {
+                output.append(out.constData(), static_cast<size_t>(out.size()));
+                feed_install_output_line(pending_line, out.constData(), out.size());
+            }
+            if (!err.isEmpty()) {
+                output.append(err.constData(), static_cast<size_t>(err.size()));
+                feed_install_output_line(pending_line, err.constData(), err.size());
+            }
             break;
         }
-        DWORD avail = 0;
-        if (!PeekNamedPipe(read_pipe, nullptr, 0, nullptr, &avail, nullptr) || avail == 0) {
-            DWORD exit_code = 0;
-            if (GetExitCodeProcess(pi.hProcess, &exit_code) && exit_code != STILL_ACTIVE)
-                break;
-            std::this_thread::sleep_for(std::chrono::milliseconds(50));
-            continue;
-        }
-        if (ReadFile(read_pipe, buf, sizeof(buf) - 1, &bytes_read, nullptr) && bytes_read > 0) {
-            output.append(buf, bytes_read);
-        }
     }
-
-    while (ReadFile(read_pipe, buf, sizeof(buf) - 1, &bytes_read, nullptr) && bytes_read > 0)
-        output.append(buf, bytes_read);
-
-    CloseHandle(read_pipe);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
+    if (!pending_line.empty()) {
+        emit_install_output(pending_line);
+        pending_line.clear();
+    }
+    if (terminated)
+        emit_install_output("Process timed out and was terminated");
+    diag::log_tagged_fmt("mcp_market", "install_spawn_exit program='%s' code=%d timeout=%d",
+        program.toStdString().c_str(), process.exitCode(), terminated ? 1 : 0);
     return output;
 }
 
@@ -621,19 +666,118 @@ void install_async(const package_info_t& pkg)
             diag::log_tagged_fmt("mcp_market", "install_async npm pkg='%s' dir='%.120s'",
                 p.name.c_str(), pkg_dir.c_str());
             std::string spec = p.name + (p.version.empty() ? std::string{} : "@" + p.version);
-            std::string cmd = "cmd.exe /c npm install --prefix \"" + pkg_dir + "\" \"" + spec + "\"";
-            output = run_process_capture(cmd, pkg_dir, 120000);
+            const QString node = QStandardPaths::findExecutable(QStringLiteral("node"));
+            QString npm_cli;
+            if (!node.isEmpty()) {
+                const QString node_dir = QFileInfo(node).absolutePath();
+                const QString candidate = node_dir
+                    + QStringLiteral("/node_modules/npm/bin/npm-cli.js");
+                if (QFileInfo::exists(candidate))
+                    npm_cli = candidate;
+            }
+            if (!node.isEmpty() && !npm_cli.isEmpty()) {
+                emit_install_output("npm install (node) " + spec);
+                output = run_process_capture(node,
+                    { npm_cli, QStringLiteral("install"),
+                      QStringLiteral("--prefix"), QString::fromStdString(pkg_dir),
+                      QString::fromStdString(spec) },
+                    pkg_dir, 120000);
+            } else {
+                diag::log_tagged("mcp_market",
+                    "install_async npm node/npm-cli resolution failed; using cmd.exe fallback");
+                emit_install_output("npm install (cmd.exe) " + spec);
+                QProcess process;
+                process.setWorkingDirectory(QString::fromStdString(pkg_dir));
+                process.setProcessChannelMode(QProcess::SeparateChannels);
+                const QString native = QStringLiteral("/c npm install --prefix \"%1\" \"%2\"")
+                    .arg(QString::fromStdString(pkg_dir), QString::fromStdString(spec));
+                process.setNativeArguments(native);
+                process.start(QStringLiteral("cmd.exe"), {});
+                if (!process.waitForStarted(10000)) {
+                    output = "Failed to start cmd.exe: "
+                        + process.errorString().toStdString();
+                    emit_install_output(output);
+                } else {
+                    QElapsedTimer timer;
+                    timer.start();
+                    std::string pending_line;
+                    while (true) {
+                        if (timer.elapsed() > 120000) {
+                            process.terminate();
+                            if (!process.waitForFinished(3000)) {
+                                process.kill();
+                                process.waitForFinished(1000);
+                            }
+                            break;
+                        }
+                        bool progressed = false;
+                        if (process.waitForReadyRead(50)) {
+                            const QByteArray out = process.readAllStandardOutput();
+                            const QByteArray err = process.readAllStandardError();
+                            if (!out.isEmpty()) {
+                                output.append(out.constData(),
+                                    static_cast<size_t>(out.size()));
+                                feed_install_output_line(pending_line, out.constData(),
+                                    out.size());
+                                progressed = true;
+                            }
+                            if (!err.isEmpty()) {
+                                output.append(err.constData(),
+                                    static_cast<size_t>(err.size()));
+                                feed_install_output_line(pending_line, err.constData(),
+                                    err.size());
+                                progressed = true;
+                            }
+                        }
+                        if (process.state() == QProcess::NotRunning && !progressed)
+                            break;
+                        if (process.state() == QProcess::NotRunning) {
+                            const QByteArray out = process.readAllStandardOutput();
+                            const QByteArray err = process.readAllStandardError();
+                            if (!out.isEmpty()) {
+                                output.append(out.constData(),
+                                    static_cast<size_t>(out.size()));
+                                feed_install_output_line(pending_line, out.constData(),
+                                    out.size());
+                            }
+                            if (!err.isEmpty()) {
+                                output.append(err.constData(),
+                                    static_cast<size_t>(err.size()));
+                                feed_install_output_line(pending_line, err.constData(),
+                                    err.size());
+                            }
+                            break;
+                        }
+                    }
+                    if (!pending_line.empty())
+                        emit_install_output(pending_line);
+                }
+            }
         } else {
             diag::log_tagged_fmt("mcp_market", "install_async pypi pkg='%s' dir='%.120s'",
                 p.name.c_str(), pkg_dir.c_str());
             std::string venv_dir = pkg_dir + "\\venv";
-            std::string cmd_venv = "python -m venv \"" + venv_dir + "\"";
-            run_process_capture(cmd_venv, pkg_dir, 60000);
+            const QString python =
+                QStandardPaths::findExecutable(QStringLiteral("python"));
+            if (python.isEmpty()) {
+                std::lock_guard<std::mutex> lk(s_mtx);
+                s_install_state = install_state_t::error_state;
+                s_install_error = "python.exe not found on PATH";
+                emit_install_output(s_install_error);
+                return;
+            }
+            emit_install_output("python -m venv " + venv_dir);
+            run_process_capture(python,
+                { QStringLiteral("-m"), QStringLiteral("venv"),
+                  QString::fromStdString(venv_dir) },
+                pkg_dir, 60000);
 
-            std::string pip = venv_dir + "\\Scripts\\pip.exe";
+            const QString pip = QString::fromStdString(venv_dir + "\\Scripts\\pip.exe");
             std::string spec = p.version.empty() ? p.name : (p.name + "==" + p.version);
-            std::string cmd_install = "\"" + pip + "\" install \"" + spec + "\"";
-            output = run_process_capture(cmd_install, pkg_dir, 120000);
+            emit_install_output("pip install " + spec);
+            output = run_process_capture(pip,
+                { QStringLiteral("install"), QString::fromStdString(spec) },
+                pkg_dir, 120000);
         }
 
 
@@ -679,51 +823,6 @@ void install_async(const package_info_t& pkg)
         s_install_state = install_state_t::error_state;
         s_install_error = "Failed to schedule marketplace install.";
     }
-}
-
-
-bool uninstall(const std::string& package_name)
-{
-    diag::log_tagged_fmt("mcp_market", "uninstall pkg='%s'", package_name.c_str());
-    ::s_mcp_client_mgr.disconnect_server(package_name);
-    ::s_mcp_client_mgr.remove_server(package_name);
-
-    std::string remove_path;
-    bool found = false;
-    {
-        std::lock_guard<std::mutex> lk(s_installed_mtx);
-        auto it = std::find_if(s_installed.begin(), s_installed.end(),
-            [&](const installed_server_t& s) { return s.package_name == package_name; });
-        if (it == s_installed.end()) return false;
-        remove_path = it->install_path;
-        s_installed.erase(it);
-        found = true;
-    }
-
-    if (!remove_path.empty()) {
-        std::error_code can_ec;
-        auto root = std::filesystem::weakly_canonical(marketplace_dir(), can_ec);
-        if (can_ec) root = marketplace_dir();
-        auto target = std::filesystem::weakly_canonical(remove_path, can_ec);
-        if (can_ec) target = remove_path;
-        const std::string root_str = root.string();
-        const std::string target_str = target.string();
-        if (!root_str.empty()
-            && target_str.size() >= root_str.size()
-            && target_str.compare(0, root_str.size(), root_str) == 0
-            && target_str.size() > root_str.size())
-        {
-            std::error_code ec;
-            std::filesystem::remove_all(target_str, ec);
-        }
-    }
-
-    s_install_persist_pending.store(true, std::memory_order_release);
-    diag::log_tagged_fmt("mcp_market", "uninstall %s pkg='%s'",
-        found ? "ok" : "not_found", package_name.c_str());
-    enqueue_deferred_log(bottom_tab_t::output,
-        "[marketplace] Uninstalled " + package_name);
-    return found;
 }
 
 

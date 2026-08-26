@@ -1,0 +1,96 @@
+name: Install Triton dependencies (macOS)
+
+description: Installs all dependencies required to build and test Triton on macOS
+
+inputs:
+  python-version:
+    description: Python version to use
+    default: '3.11'
+  llvm-version:
+    description: LLVM version to install
+    default: '19'
+  bitwuzla-version:
+    description: Bitwuzla version to install
+    default: '0.9.0'
+  capstone-version:
+    description: Capstone version to install
+    default: '5.0.7'
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python ${{ inputs.python-version }}
+      uses: actions/setup-python@v6
+      with:
+        python-version: ${{ inputs.python-version }}
+
+    - name: Upgrade pip
+      run: |
+        python -m pip install -U pip
+      shell: bash
+
+    - name: Fix Homebrew git installation
+      run: |
+        brew update
+        brew reinstall git
+      shell: bash
+
+    - name: Install Python build dependencies
+      run: |
+        python -m pip install setuptools importlib-resources build meson
+      shell: bash
+
+    - name: Install LLVM
+      uses: KyleMayes/install-llvm-action@v2
+      with:
+        version: ${{ inputs.llvm-version }}
+        directory: ${{ runner.temp }}/llvm
+
+    - name: Install z3
+      run: |
+        wget -q https://github.com/Z3Prover/z3/releases/download/z3-4.16.0/z3-4.16.0-arm64-osx-15.7.3.zip
+        unzip -q z3-4.16.0-arm64-osx-15.7.3.zip
+        echo "Z3_INCLUDE_DIRS=$GITHUB_WORKSPACE/z3-4.16.0-arm64-osx-15.7.3/include" >> $GITHUB_ENV
+        echo "Z3_LIBRARIES=$GITHUB_WORKSPACE/z3-4.16.0-arm64-osx-15.7.3/bin/libz3.dylib" >> $GITHUB_ENV
+        echo "Z3_LIB_DIR=$GITHUB_WORKSPACE/z3-4.16.0-arm64-osx-15.7.3/bin" >> $GITHUB_ENV
+      shell: bash
+
+    - name: Install Bitwuzla
+      run: |
+        wget -q https://github.com/bitwuzla/bitwuzla/archive/refs/tags/${{ inputs.bitwuzla-version }}.tar.gz
+        tar -xf ${{ inputs.bitwuzla-version }}.tar.gz
+        cd bitwuzla-${{ inputs.bitwuzla-version }}
+        python ./configure.py --shared --prefix $(pwd)/install
+        cd build
+        ninja install
+        find . -name "libcadical*.dylib" -exec cp {} ../install/lib/ \;
+        cd ..
+        echo "BITWUZLA_INCLUDE_DIRS=$GITHUB_WORKSPACE/bitwuzla-${{ inputs.bitwuzla-version }}/install/include" >> $GITHUB_ENV
+        echo "BITWUZLA_LIBRARIES=$GITHUB_WORKSPACE/bitwuzla-${{ inputs.bitwuzla-version }}/install/lib/libbitwuzla.dylib" >> $GITHUB_ENV
+        echo "BITWUZLA_LIB_DIR=$GITHUB_WORKSPACE/bitwuzla-${{ inputs.bitwuzla-version }}/install/lib" >> $GITHUB_ENV
+      shell: bash
+
+    - name: Install Capstone
+      run: |
+        wget -q https://github.com/capstone-engine/capstone/releases/download/5.0.7/capstone-${{ inputs.capstone-version }}.tar.xz
+        tar -xf capstone-${{ inputs.capstone-version }}.tar.xz
+        cd capstone-${{ inputs.capstone-version }}
+        cmake -B build \
+          -DCAPSTONE_ARCHITECTURE_DEFAULT=OFF \
+          -DCAPSTONE_ARM_SUPPORT=ON \
+          -DCAPSTONE_ARM64_SUPPORT=ON \
+          -DCAPSTONE_X86_SUPPORT=ON \
+          -DCAPSTONE_RISCV_SUPPORT=ON \
+          -DBUILD_SHARED_LIBS=ON \
+          -DCMAKE_BUILD_TYPE=Release
+        cmake --build build --config Release --parallel
+        cmake --install build --config Release --prefix install
+        echo "CAPSTONE_INCLUDE_DIRS=$GITHUB_WORKSPACE/capstone-${{ inputs.capstone-version }}/install/include" >> $GITHUB_ENV
+        echo "CAPSTONE_LIBRARIES=$GITHUB_WORKSPACE/capstone-${{ inputs.capstone-version }}/install/lib/libcapstone.dylib" >> $GITHUB_ENV
+        echo "CAPSTONE_LIB_DIR=$GITHUB_WORKSPACE/capstone-${{ inputs.capstone-version }}/install/lib" >> $GITHUB_ENV
+      shell: bash
+
+    - name: Install Unicorn and LIEF
+      run: |
+        python -m pip install unicorn lief
+      shell: bash

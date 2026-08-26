@@ -1,7 +1,6 @@
 #include "test_lab.hpp"
 #include "test_lab_format.hpp"
 #include "../../../../driver/comm.h"
-#include "imgui/imgui.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -40,24 +39,20 @@ namespace {
 		std::memcpy(r.raw.data(), &req, sizeof(req));
 	}
 
-	void render_inputs_psbx(test_lab::state_t& s) {
-		ImGui::InputScalar("PID", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		ImGui::InputScalar("Flags (u32_a)", ImGuiDataType_U32, &s.u32_a, nullptr, nullptr, "%08X",
-			ImGuiInputTextFlags_CharsHexadecimal);
-		if (ImGui::SmallButton("Default (0 -> SANDBOX_FLAG_DEFAULT)")) {
-			s.u32_a = 0u;
-		}
-		ImGui::SameLine();
-		if (ImGui::SmallButton("All Blocks + Net Log")) {
-			s.u32_a =
+	void render_inputs_psbx(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("PID", &s.pid, false);
+		form.u32("Flags (u32_a)", &s.u32_a, true);
+		form.action("Default (0 -> SANDBOX_FLAG_DEFAULT)", [](test_lab::state_t& st) { st.u32_a = 0u; });
+		form.action("All Blocks + Net Log", [](test_lab::state_t& st) {
+			st.u32_a =
 				voyager::detail::SANDBOX_FLAG_BLOCK_PERSISTENCE
 				| voyager::detail::SANDBOX_FLAG_BLOCK_DRIVER_INSTALL
 				| voyager::detail::SANDBOX_FLAG_BLOCK_RAW_DISK
 				| voyager::detail::SANDBOX_FLAG_BLOCK_KERNEL_HANDLE
 				| voyager::detail::SANDBOX_FLAG_LOG_NETWORK
 				| voyager::detail::SANDBOX_FLAG_BLOCK_CHILD_SPAWN;
-		}
-		ImGui::TextDisabled("Marks the PID as malware-safe; kernel enforces the selected sandbox restrictions.");
+		});
+		form.note("Marks the PID as malware-safe; kernel enforces the selected sandbox restrictions.");
 	}
 
 	void run_psbx(test_lab::state_t& s, test_lab::result_t& r) {
@@ -101,9 +96,9 @@ namespace {
 		r.ok = true;
 	}
 
-	void render_inputs_usbx(test_lab::state_t& s) {
-		ImGui::InputScalar("PID", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		ImGui::TextDisabled("Releases the PID from the malware-safe sandbox table (no-op if not registered).");
+	void render_inputs_usbx(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("PID", &s.pid, false);
+		form.note("Releases the PID from the malware-safe sandbox table (no-op if not registered).");
 	}
 
 	void run_usbx(test_lab::state_t& s, test_lab::result_t& r) {

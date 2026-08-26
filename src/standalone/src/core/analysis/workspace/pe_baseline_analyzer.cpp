@@ -1272,10 +1272,8 @@ struct pe_baseline_analyzer_t::impl_t {
         const auto hardware = (std::max)(1U, std::thread::hardware_concurrency());
         std::uint32_t compute_capacity =
             (std::min)(64U, (std::max)(2U, hardware));
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
         compute_capacity =
             aida::infra::taskflow_runtime::analysis_compute_capacity();
-#endif
         decode_workers = settings.decode_worker_lanes != 0
             ? (std::min)(64U, (std::max)(2U, settings.decode_worker_lanes))
             : (std::min)(64U, (std::max)(2U,

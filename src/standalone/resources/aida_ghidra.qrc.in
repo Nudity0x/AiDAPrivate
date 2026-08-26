@@ -1,0 +1,8 @@
+<RCC>
+    <qresource prefix="/ghidra">
+        <file alias="x86-64.sla">@GHIDRA_SPECS_OUTPUT_DIR@/x86-64.sla</file>
+        <file alias="x86-64.pspec">@GHIDRA_SPECS_OUTPUT_DIR@/x86-64.pspec</file>
+        <file alias="x86-64-win.cspec">@GHIDRA_SPECS_OUTPUT_DIR@/x86-64-win.cspec</file>
+        <file alias="x86.ldefs">@GHIDRA_SPECS_OUTPUT_DIR@/x86.ldefs</file>
+    </qresource>
+</RCC>

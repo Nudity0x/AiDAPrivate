@@ -9,6 +9,8 @@
 !/tools/
 !/cmake/
 !/docs/
+!/camoufox-reverse-mcp/
+!/sources/
 
 # Allow essential project configuration files
 !.gitignore
@@ -85,14 +87,15 @@ models.json
 
 # Excluded Project Roots
 /bot/
-/camoufox-reverse-mcp/
 /firebase/
 /ida-sdk/
 /libdecomp/
 /libs/
 /mapper/
 /packaging/
-/sources/
+/sources/*
+!/sources/ghidra/
+!/sources/Triton/
 
 # Excluded specific files
 /perception_analysis.md

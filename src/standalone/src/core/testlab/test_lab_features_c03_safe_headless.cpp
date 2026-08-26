@@ -2,8 +2,6 @@
 
 #include "test_lab_format.hpp"
 
-#include "imgui/imgui.h"
-
 #include <windows.h>
 #include <bcrypt.h>
 
@@ -950,14 +948,16 @@ std::filesystem::path executable_directory() {
 	return std::filesystem::path(buffer).parent_path();
 }
 
-void render_inputs(state_t&) {
+void render_inputs(state_t&, input_form_t& form) {
 	const auto root = executable_directory() / L"c03-safe-headless";
 	const auto manifest = root / L"manifest.json";
-	ImGui::TextWrapped("Approved root: %ls", root.c_str());
-	ImGui::TextWrapped("Manifest: %ls", manifest.c_str());
-	ImGui::TextDisabled("This driverless lane executes only build-verified safe-headless harnesses.");
-	if (cancellation_requested()) ImGui::TextUnformatted("Cancellation requested");
-	if (ImGui::Button("Cancel C03 lane", ImVec2(150.0f, 26.0f))) request_cancellation();
+	const std::string root_note = "Approved root: " + root.u8string();
+	const std::string manifest_note = "Manifest: " + manifest.u8string();
+	form.note(root_note.c_str());
+	form.note(manifest_note.c_str());
+	form.note("This driverless lane executes only build-verified safe-headless harnesses.");
+	if (cancellation_requested()) form.note("Cancellation requested");
+	form.action("Cancel C03 lane", [](state_t&) { request_cancellation(); });
 }
 
 void run_feature(state_t&, result_t& result) {

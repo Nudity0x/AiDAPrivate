@@ -220,14 +220,6 @@ public:
                           std::shared_ptr<const workspace_image_t> image,
                           std::optional<workspace_provider_binding_t> binding = {},
                           const cancellation_token_t& cancel = {});
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    static workspace_result_t<std::shared_ptr<analysis_workspace_t>>
-        create_preview(std::shared_ptr<const workspace_identity_t> identity,
-                       std::shared_ptr<const byte_provider_t> provider,
-                       std::shared_ptr<const workspace_image_t> normalized_image,
-                       std::shared_ptr<const pe_image_t> image,
-                       std::shared_ptr<const analysis_snapshot_t> snapshot);
-#endif
 
     ~analysis_workspace_t();
     analysis_workspace_t(const analysis_workspace_t&) = delete;
@@ -280,16 +272,6 @@ public:
         std::function<workspace_result_t<void>(
             const std::shared_ptr<const analysis_snapshot_t>&,
             const std::shared_ptr<search_index_t>&)> finalizer);
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    workspace_result_t<void> publish_preview_overlay_generation(
-        std::uint64_t expected_generation,
-        std::uint64_t expected_analysis_revision,
-        std::uint64_t expected_overlay_revision,
-        std::uint64_t target_generation,
-        std::uint64_t target_overlay_revision,
-        std::shared_ptr<const workspace_overlay_presentation_t> presentation,
-        std::function<workspace_result_t<void>()> finalizer);
-#endif
 
     std::uint64_t generation() const noexcept;
     std::uint64_t analysis_revision() const noexcept;

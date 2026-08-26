@@ -1,7 +1,7 @@
 #pragma once
 
 #include "application_action_registry.hpp"
-#include "imgui/imgui.h"
+#include "chord_stroke.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -30,7 +30,7 @@ enum class shortcut_modal_policy_t : std::uint8_t {
 };
 
 struct shortcut_sequence_t {
-    std::vector<ImGuiKeyChord> strokes;
+    std::vector<chord_stroke_t> strokes;
     std::string display_text;
 
     bool operator==(const shortcut_sequence_t& other) const noexcept {
@@ -103,7 +103,7 @@ public:
         shortcut_binding_t binding,
         const application_action_registry_t& actions);
 
-    shortcut_resolution_t feed(ImGuiKeyChord stroke,
+    shortcut_resolution_t feed(chord_stroke_t stroke,
                                bool repeated,
                                std::uint64_t timestamp_ms,
                                const interaction_context_t& context,
@@ -142,7 +142,7 @@ private:
         const std::vector<stable_action_binding_id_t>& candidates,
         const interaction_context_t& context,
         const application_action_registry_t& actions) const;
-    shortcut_resolution_t begin_sequence(ImGuiKeyChord stroke,
+    shortcut_resolution_t begin_sequence(chord_stroke_t stroke,
                                          bool repeated,
                                          std::uint64_t timestamp_ms,
                                          const interaction_context_t& context,

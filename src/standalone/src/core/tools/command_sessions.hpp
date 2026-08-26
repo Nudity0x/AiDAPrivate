@@ -87,7 +87,7 @@ struct command_session_t
 				opts.tool_or_request_id = id.c_str();
 				opts.lease_token = downstream_token;
 				opts.status_code = 0;
-				aida::diagnostics::emit(std::move(opts));
+				aida::diagnostics::emit_breadcrumb(std::move(opts));
 			}
 		}
 	}
@@ -177,7 +177,7 @@ acquire_background_command_admission(const std::string& principal_id,
 		opts.tool_or_request_id = command_label.c_str();
 		opts.session_or_target = session_id.c_str();
 		opts.status_code = 1;
-		aida::diagnostics::emit(std::move(opts));
+		aida::diagnostics::emit_breadcrumb(std::move(opts));
 		return admission_result_t::rejected_result(
 			"ui_thread_blocked", "ui_thread_policy", "thread", 0, 0);
 	}
@@ -203,7 +203,7 @@ acquire_background_command_admission(const std::string& principal_id,
 		opts.session_or_target = session_id.c_str();
 		opts.lease_token = result.admission_token;
 		opts.status_code = 0;
-		aida::diagnostics::emit(std::move(opts));
+		aida::diagnostics::emit_breadcrumb(std::move(opts));
 	} else {
 		diag::log_tagged_fmt("mcp_srv",
 			"BACKGROUND-COMMAND-REJECT principal=%s session=%s command_label=%s "
@@ -220,7 +220,7 @@ acquire_background_command_admission(const std::string& principal_id,
 		opts.tool_or_request_id = command_label.c_str();
 		opts.session_or_target = session_id.c_str();
 		opts.status_code = 1;
-		aida::diagnostics::emit(std::move(opts));
+		aida::diagnostics::emit_breadcrumb(std::move(opts));
 	}
 	return result;
 }
@@ -260,7 +260,7 @@ inline void release_downstream_token(command_session_t& sess, const char* reason
 	opts.tool_or_request_id = sess.id.c_str();
 	opts.lease_token = sess.downstream_token;
 	opts.status_code = 0;
-	aida::diagnostics::emit(std::move(opts));
+	aida::diagnostics::emit_breadcrumb(std::move(opts));
 	sess.downstream_token = 0;
 }
 

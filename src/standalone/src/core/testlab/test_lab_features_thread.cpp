@@ -3,7 +3,6 @@
 #include "../runtime/standalone_driver.hpp"
 #include "../../helpers/diag_log.hpp"
 #include "../../../../driver/comm.h"
-#include "imgui/imgui.h"
 
 #include <Windows.h>
 #include <cstdint>
@@ -354,10 +353,10 @@ namespace {
 		return mask;
 	}
 
-	void render_inputs_tctx(test_lab::state_t& s) {
-		ImGui::InputScalar("PID", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		ImGui::InputScalar("TID", ImGuiDataType_U32, &s.tid, nullptr, nullptr, "%u");
-		ImGui::TextDisabled("Captures GPR / RIP / RFLAGS / DR0-DR7 for the target thread.");
+	void render_inputs_tctx(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("PID", &s.pid, false);
+		form.u32("TID", &s.tid, false);
+		form.note("Captures GPR / RIP / RFLAGS / DR0-DR7 for the target thread.");
 	}
 
 	void run_tctx(test_lab::state_t& s, test_lab::result_t& r) {
@@ -905,9 +904,9 @@ namespace {
 		r.ok = true;
 	}
 
-	void render_inputs_tenum(test_lab::state_t& s) {
-		ImGui::InputScalar("PID", ImGuiDataType_U32, &s.pid, nullptr, nullptr, "%u");
-		ImGui::TextDisabled("Lists up to 256 threads (TID, state, RIP) belonging to the process.");
+	void render_inputs_tenum(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("PID", &s.pid, false);
+		form.note("Lists up to 256 threads (TID, state, RIP) belonging to the process.");
 	}
 
 	const char* thread_state_to_string(std::uint32_t state) {
@@ -965,13 +964,11 @@ namespace {
 		r.ok = true;
 	}
 
-	void render_inputs_tsr(test_lab::state_t& s) {
-		ImGui::InputScalar("TID", ImGuiDataType_U32, &s.tid, nullptr, nullptr, "%u");
-		const char* items[] = { "Suspend (u32_a=1)", "Resume (u32_a=0)" };
-		int sel = (s.u32_a == 1u) ? 0 : 1;
-		ImGui::Combo("Action", &sel, items, IM_ARRAYSIZE(items));
-		s.u32_a = (sel == 0) ? 1u : 0u;
-		ImGui::TextDisabled("Driver returns the previous suspend count.");
+	void render_inputs_tsr(test_lab::state_t& s, test_lab::input_form_t& form) {
+		form.u32("TID", &s.tid, false);
+		const char* items[] = { "Resume (u32_a=0)", "Suspend (u32_a=1)" };
+		form.combo("Action", &s.u32_a, items, sizeof(items) / sizeof(items[0]));
+		form.note("Driver returns the previous suspend count.");
 	}
 
 	void run_tsr(test_lab::state_t& s, test_lab::result_t& r) {

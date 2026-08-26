@@ -1,10 +1,6 @@
 #include "../../../src/core/mcp/compat/c03_compatibility_registration.hpp"
 #include "../../../src/core/testlab/test_all_features.hpp"
-#include "../../../src/core/ai/provider_view.hpp"
-#include "../../../src/core/ai/settings_overlay.hpp"
-#include "../../../src/core/analysis/struct_recon_view.hpp"
-#include "../../../src/core/analysis/types_hub_view_api.hpp"
-#include "../../../src/core/auth/auth_view.hpp"
+#include "../../../src/core/ai/conversation_history.hpp"
 #include "../../../src/core/debugger/debugger_view.hpp"
 #include "../../../src/core/disasm/disasm_view.hpp"
 #include "../../../src/core/disasm/pseudocode_view.hpp"
@@ -13,24 +9,20 @@
 #include "../../../src/core/network/burp/burp_module.hpp"
 #include "../../../src/core/network/network_view.hpp"
 #include "../../../src/core/runtime/run_target.hpp"
-#include "../../../src/core/scanner/memory_scanner_view.hpp"
-#include "../../../src/core/ui/application_view_registry.hpp"
-#include "../../../src/core/ui/chat_render.hpp"
 #include "../../../src/core/ui/context_menu_renderer.hpp"
-#include "../../../src/core/ui/design_system.hpp"
+#include "../../../src/core/ui/embedded_resources.hpp"
 #include "../../../src/core/ui/explorer_views.hpp"
-#include "../../../src/core/ui/fonts.hpp"
-#include "../../../src/core/ui/output_views.hpp"
-#include "../../../src/core/ui/programming_language_views.hpp"
 #include "../../../src/core/ui/programming_tasks.hpp"
 #include "../../../src/core/ui/task_center.hpp"
 #include "../../../src/core/ui/ui_thread_dispatcher.hpp"
-#include "../../../src/core/ui/workspace_layout.hpp"
+#include "../../../src/qt/programming/programming_host_hooks.hpp"
+#include "../../../src/qt/scanner/scan_commands.hpp"
+#include "../../../src/qt/analysis_bridge/gui_post.hpp"
 
-#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <string>
@@ -38,73 +30,22 @@
 #include <utility>
 #include <vector>
 
-struct ID3D11Device;
-
 namespace {
 
 constexpr char kHeadlessUnavailable[] =
     "Unavailable in the C03 safe headless runtime";
-
-aida::ui::view_operation_result_t unavailable_view_operation()
-{
-    return {aida::ui::view_operation_status_t::unavailable, kHeadlessUnavailable};
-}
-
-aida::ui::output_views::operation_result_t unavailable_output_operation()
-{
-    return {false, kHeadlessUnavailable};
-}
 
 aida::ui::programming_tasks::operation_result_t unavailable_programming_operation()
 {
     return {false, kHeadlessUnavailable};
 }
 
-constexpr std::array<aida::ui::workspace_layout::workspace_preset_descriptor_t, 8>
-    kHeadlessWorkspacePresets{{
-        {aida::ui::workspace_layout::workspace_preset_t::analysis,
-         "analysis", "Analysis",
-         "Disassembly, pseudocode, graph, symbols, references and inspection", 3},
-        {aida::ui::workspace_layout::workspace_preset_t::debugging,
-         "debugging", "Debugging",
-         "Execution controls, CPU, registers, breakpoints, threads, stack and trace", 3},
-        {aida::ui::workspace_layout::workspace_preset_t::memory,
-         "memory", "Memory",
-         "Process sessions, scans, results, memory map, hex, pointers and patches", 3},
-        {aida::ui::workspace_layout::workspace_preset_t::types_structures,
-         "types-structures", "Types and Structures",
-         "Type catalogs, structure layouts, live values and propagation", 3},
-        {aida::ui::workspace_layout::workspace_preset_t::network,
-         "network", "Network",
-         "Proxy history, repeater, browser, protocol streams and evidence", 3},
-        {aida::ui::workspace_layout::workspace_preset_t::automation_ai,
-         "automation-ai", "Automation and AI",
-         "Chat, agents, skills, MCP activity, evidence review and tasks", 3},
-        {aida::ui::workspace_layout::workspace_preset_t::programming,
-         "programming", "Programming",
-         "Project explorer, source editing, search, terminal, problems and debugging", 3},
-        {aida::ui::workspace_layout::workspace_preset_t::safe,
-         "safe", "Safe Layout",
-         "Recovery workspace with Start Center, diagnostics and essential navigation", 3}
-    }};
-
+aida::qt::programming::host::operation_result_t unavailable_host_operation()
+{
+    return {false, kHeadlessUnavailable};
 }
 
-wchar_t g_aidaWindowTitle[128] = L"AiDA C03 Safe Headless";
-wchar_t g_aidaClassName[128] = L"AiDAC03SafeHeadlessBoundary";
-ImFont* g_font_ui_600 = nullptr;
-ImFont* g_font_ui_500_sm = nullptr;
-HWND g_hwnd = nullptr;
-ID3D11Device* g_pd3dDevice = nullptr;
-
-struct ConversationSummary {
-    std::string id;
-    std::string title;
-    int64_t created = 0;
-    int msg_count = 0;
-    bool pinned = false;
-    std::uint64_t revision = 0;
-};
+}
 
 namespace mcp_standalone {
 
@@ -112,6 +53,22 @@ c03_compatibility_runtime_config_t
 make_application_c03_compatibility_runtime_config()
 {
     return {};
+}
+
+}
+
+namespace embedded_resources {
+
+std::string extract_ghidra_specs()
+{
+    OutputDebugStringA("embedded_resources: ghidra spec resource not found\n");
+    return {};
+}
+
+std::size_t ghidra_spec_resource_count(std::size_t& total_bytes)
+{
+    total_bytes = 0;
+    return 0;
 }
 
 }
@@ -130,9 +87,18 @@ bool is_unattended_full_test_active()
 
 }
 
+namespace aida::qt {
+
+void gui_post_or_run(std::function<void()> fn)
+{
+    if (fn) fn();
+}
+
+}
+
 namespace aida::ui_thread {
 
-DWORD owner_tid()
+unsigned long owner_tid()
 {
     return 0;
 }
@@ -207,187 +173,6 @@ std::string top_queued_labels(std::size_t)
 
 }
 
-namespace aida::ui::application_views {
-
-void initialize()
-{
-}
-
-view_registry_t& registry()
-{
-    static view_registry_t headless_registry;
-    return headless_registry;
-}
-
-view_operation_result_t open_or_focus(const stable_view_id_t&)
-{
-    return unavailable_view_operation();
-}
-
-view_operation_result_t close(const stable_view_id_t&)
-{
-    return unavailable_view_operation();
-}
-
-view_operation_result_t close_instance(const view_instance_id_t&)
-{
-    return unavailable_view_operation();
-}
-
-view_operation_result_t close_other_instances(const view_instance_id_t&)
-{
-    return unavailable_view_operation();
-}
-
-view_operation_result_t toggle_pin(const view_instance_id_t&)
-{
-    return unavailable_view_operation();
-}
-
-view_operation_result_t request_reset_state(const view_instance_id_t&)
-{
-    return unavailable_view_operation();
-}
-
-view_operation_result_t duplicate_instance(const view_instance_id_t&)
-{
-    return unavailable_view_operation();
-}
-
-view_operation_result_t reopen_last_closed()
-{
-    return unavailable_view_operation();
-}
-
-view_operation_result_t open_default_missing()
-{
-    return unavailable_view_operation();
-}
-
-bool is_open(const stable_view_id_t&) noexcept
-{
-    return false;
-}
-
-bool is_pinned(const view_instance_id_t&) noexcept
-{
-    return false;
-}
-
-bool can_duplicate(const view_instance_id_t&) noexcept
-{
-    return false;
-}
-
-bool can_reset_state(const view_instance_id_t&) noexcept
-{
-    return false;
-}
-
-bool can_reopen_last_closed() noexcept
-{
-    return false;
-}
-
-const char* category_label(view_category_t category) noexcept
-{
-    switch (category) {
-    case view_category_t::shell: return "Shell";
-    case view_category_t::explorer: return "Explore";
-    case view_category_t::document: return "Documents";
-    case view_category_t::analysis: return "Analysis";
-    case view_category_t::debugger: return "Debugging";
-    case view_category_t::memory: return "Memory";
-    case view_category_t::types: return "Types and Structures";
-    case view_category_t::network: return "Network";
-    case view_category_t::automation: return "Automation and AI";
-    case view_category_t::programming: return "Programming";
-    case view_category_t::output: return "Output";
-    case view_category_t::settings: return "Settings";
-    }
-    return "Views";
-}
-
-}
-
-namespace aida::ui::design {
-
-void set_preferences(preferences_t)
-{
-}
-
-scaled_metrics_t metrics()
-{
-    return {};
-}
-
-void text(text_role_t, const char*)
-{
-}
-
-void tooltip_for_last_item(const char*, const char*, const char*)
-{
-}
-
-action_result_t render_toolbar(const char*, const action_t*, std::size_t, float)
-{
-    return {};
-}
-
-action_result_t render_state(const state_presentation_t&, ImVec2)
-{
-    return {};
-}
-
-bool begin_dialog(const char*, const char*, ImVec2, ImVec2)
-{
-    return false;
-}
-
-bool begin_dialog_exact(const char*, ImVec2, ImVec2, bool*, ImGuiWindowFlags)
-{
-    return false;
-}
-
-void open_dialog(const char*, const char*)
-{
-}
-
-float dialog_footer_reserve_height(const char*, const char*)
-{
-    return 0.0f;
-}
-
-bool begin_dialog_body(const char*, float)
-{
-    return false;
-}
-
-void end_dialog_body()
-{
-}
-
-dialog_result_t dialog_footer(const char*, const char*, bool, bool, const char*, bool, bool)
-{
-    return {};
-}
-
-void render_confirmation_content(const confirmation_t&)
-{
-}
-
-dialog_result_t confirmation_dialog(const char*, const confirmation_t&)
-{
-    return {};
-}
-
-bool publish_notification(notification_t)
-{
-    return false;
-}
-
-}
-
 namespace aida::ui::explorer_views {
 
 bool can_restore_previous_session()
@@ -419,86 +204,86 @@ file_operation_result_t request_search_scope(const std::string&, bool)
 
 }
 
-namespace aida::ui::output_views {
+namespace aida::qt::programming::host {
 
 operation_result_t copy_all(bottom_tab_t)
 {
-    return unavailable_output_operation();
+    return unavailable_host_operation();
 }
 
 operation_result_t clear(bottom_tab_t)
 {
-    return unavailable_output_operation();
+    return unavailable_host_operation();
 }
 
 operation_result_t select_all(bottom_tab_t)
 {
-    return unavailable_output_operation();
+    return unavailable_host_operation();
 }
 
 operation_result_t toggle_follow(bottom_tab_t)
 {
-    return unavailable_output_operation();
+    return unavailable_host_operation();
 }
 
 operation_result_t focus_filter(bottom_tab_t)
 {
-    return unavailable_output_operation();
+    return unavailable_host_operation();
 }
 
 operation_result_t export_all(bottom_tab_t)
 {
-    return unavailable_output_operation();
+    return unavailable_host_operation();
 }
 
 operation_result_t terminal_new()
 {
-    return unavailable_output_operation();
+    return unavailable_host_operation();
 }
 
 operation_result_t terminal_close()
 {
-    return unavailable_output_operation();
+    return unavailable_host_operation();
 }
 
 operation_result_t terminal_restart()
 {
-    return unavailable_output_operation();
+    return unavailable_host_operation();
 }
 
 operation_result_t terminal_next()
 {
-    return unavailable_output_operation();
+    return unavailable_host_operation();
 }
 
 operation_result_t terminal_previous()
 {
-    return unavailable_output_operation();
+    return unavailable_host_operation();
 }
 
 operation_result_t terminal_split_vertical()
 {
-    return unavailable_output_operation();
+    return unavailable_host_operation();
 }
 
 operation_result_t terminal_split_horizontal()
 {
-    return unavailable_output_operation();
+    return unavailable_host_operation();
 }
 
 operation_result_t terminal_unsplit()
 {
-    return unavailable_output_operation();
+    return unavailable_host_operation();
 }
 
 operation_result_t terminal_focus_search()
 {
-    return unavailable_output_operation();
+    return unavailable_host_operation();
 }
 
 operation_result_t terminal_paste()
 {
-    return unavailable_output_operation();
+    return unavailable_host_operation();
 }
 
 bool has_content(bottom_tab_t)
@@ -529,6 +314,10 @@ std::size_t terminal_session_count() noexcept
 bool terminal_is_split() noexcept
 {
     return false;
+}
+
+void open_rename_dialog()
+{
 }
 
 }
@@ -593,27 +382,6 @@ std::string cancel_unavailable_reason()
 std::string retry_unavailable_reason()
 {
     return kHeadlessUnavailable;
-}
-
-}
-
-namespace aida::ui::workspace_layout {
-
-ImGuiID node_id(dock_role_t) noexcept
-{
-    return 0;
-}
-
-}
-
-namespace code_editor_widget {
-
-bool load_document(std::uint64_t, std::uint64_t, std::string_view,
-                   std::string_view, std::string_view, bool, int, int,
-                   float, float, bool, int, int, bool,
-                   const std::vector<int>&, std::string_view)
-{
-    return false;
 }
 
 }
@@ -697,33 +465,6 @@ bool queue_toggle_breakpoint(const debugger_interaction::context_t&, std::string
 
 }
 
-namespace types_hub_view {
-
-bool stage_type_application(const disasm_view::workspace_context_t&,
-                            const aida::analysis::address_t&,
-                            std::string* error)
-{
-    if (error)
-        *error = kHeadlessUnavailable;
-    return false;
-}
-
-}
-
-namespace memory_scanner_view {
-
-scan_command_state_t scan_command_capability(scan_command_t)
-{
-    return {false, kHeadlessUnavailable};
-}
-
-scan_command_result_t execute_scan_command(scan_command_t)
-{
-    return {false, kHeadlessUnavailable};
-}
-
-}
-
 namespace network_view {
 
 intercept_command_capability_t intercept_command_capability(intercept_command_t)
@@ -791,25 +532,6 @@ bool stage_validated_reviewed_request(const artifact_identity_t&,
 {
     staged_identity = {};
     unavailable_reason = kHeadlessUnavailable;
-    return false;
-}
-
-}
-
-namespace struct_recon_view {
-
-command_result_t copy_current_declaration()
-{
-    return {false, kHeadlessUnavailable};
-}
-
-command_result_t declare_and_apply_current()
-{
-    return {false, kHeadlessUnavailable};
-}
-
-bool has_current_structure()
-{
     return false;
 }
 
@@ -963,6 +685,18 @@ bool request_goto(const workspace_context_t&)
     return false;
 }
 
+bool request_rename_dialog(const workspace_context_t&,
+                           const aida::analysis::address_t&)
+{
+    return false;
+}
+
+bool request_comment_dialog(const workspace_context_t&,
+                            const aida::analysis::address_t&)
+{
+    return false;
+}
+
 bool request_rebase(const workspace_context_t&, std::string* error)
 {
     if (error)
@@ -975,10 +709,6 @@ bool request_listing_export(const workspace_context_t&, std::string* error)
     if (error)
         *error = kHeadlessUnavailable;
     return false;
-}
-
-void select_address(std::uint64_t, const workspace_context_t&, bool)
-{
 }
 
 void navigate_back(const workspace_context_t&)
@@ -1034,6 +764,20 @@ void request_open_confirmation(const std::string&)
 
 }
 
+namespace aida::qt::scanner {
+
+scan_command_state_t scan_command_capability(scan_command_t)
+{
+    return {};
+}
+
+scan_command_result_t execute_scan_command(scan_command_t)
+{
+    return {};
+}
+
+}
+
 namespace code_editor_widget {
 
 document_state_t document_state()
@@ -1053,15 +797,6 @@ bool request_document_action(document_action_t)
     return false;
 }
 
-void discard_document_state(std::uint64_t)
-{
-}
-
-bool select_document_for_actions(std::uint64_t)
-{
-    return false;
-}
-
 std::uint64_t active_document_id()
 {
     return 0;
@@ -1072,14 +807,47 @@ std::uint64_t document_revision()
     return 0;
 }
 
-bool get_document_caret(std::uint64_t, int& line, int& column)
+bool get_document_caret(std::uint64_t, int&, int&)
 {
-    line = 0;
-    column = 0;
     return false;
 }
 
 bool set_document_caret(std::uint64_t, int, int)
+{
+    return false;
+}
+
+bool request_streamed_document(std::uint64_t, std::uint64_t, std::string_view, std::string_view, std::uint64_t)
+{
+    return false;
+}
+
+void discard_document_state(std::uint64_t)
+{
+}
+
+void mark_document_saved(std::uint64_t, std::uint64_t, std::string_view, std::string_view)
+{
+}
+
+bool select_document_for_actions(std::uint64_t)
+{
+    return false;
+}
+
+document_payload_snapshot_t document_payload(std::uint64_t, std::uint64_t)
+{
+    return {};
+}
+
+bool propose_document_content(std::uint64_t, std::uint64_t, std::uint64_t, std::string_view, std::string_view, std::string_view)
+{
+    return false;
+}
+
+bool load_document(std::uint64_t, std::uint64_t, std::string_view, std::string_view,
+    std::string_view, bool, int, int, float, float, bool, int, int, bool,
+    const std::vector<int>&, std::string_view)
 {
     return false;
 }
@@ -1089,26 +857,9 @@ document_metadata_snapshot_t document_metadata(std::uint64_t)
     return {};
 }
 
-document_payload_snapshot_t document_payload(std::uint64_t, std::uint64_t)
-{
-    return {};
-}
-
 std::string caret_identifier()
 {
     return {};
-}
-
-void mark_document_saved(std::uint64_t, std::uint64_t,
-                         std::string_view, std::string_view)
-{
-}
-
-bool request_streamed_document(std::uint64_t, std::uint64_t,
-                               std::string_view, std::string_view,
-                               std::uint64_t)
-{
-    return false;
 }
 
 void trigger_undo()
@@ -1206,13 +957,6 @@ bool propose_full_content(std::string_view)
     return false;
 }
 
-bool propose_document_content(std::uint64_t, std::uint64_t, std::uint64_t,
-                              std::string_view, std::string_view,
-                              std::string_view)
-{
-    return false;
-}
-
 bool has_pending_diff()
 {
     return false;
@@ -1284,108 +1028,6 @@ bool commit_resolved_diff()
 
 void cancel_agent_edit()
 {
-}
-
-}
-
-namespace aida::ui::workspace_layout {
-
-window_placement_state_t inspect_window_placement(std::string_view) noexcept
-{
-    return {};
-}
-
-workspace_request_result_t float_window(std::string_view) noexcept
-{
-    return workspace_request_result_t::unavailable;
-}
-
-workspace_request_result_t dock_window(std::string_view, dock_role_t) noexcept
-{
-    return workspace_request_result_t::unavailable;
-}
-
-workspace_request_result_t split_window(
-    std::string_view, std::string_view, dock_split_direction_t) noexcept
-{
-    return workspace_request_result_t::unavailable;
-}
-
-void settle_pending_operation_for_shutdown() noexcept
-{
-}
-
-const workspace_preset_descriptor_t* presets(std::size_t& count) noexcept
-{
-    count = kHeadlessWorkspacePresets.size();
-    return kHeadlessWorkspacePresets.data();
-}
-
-workspace_preset_t active_preset() noexcept
-{
-    return workspace_preset_t::safe;
-}
-
-workspace_identity_t active_identity() noexcept
-{
-    workspace_identity_t identity;
-    identity.preset = workspace_preset_t::safe;
-    return identity;
-}
-
-bool user_layout_catalog_ready() noexcept
-{
-    return false;
-}
-
-bool layout_locked() noexcept
-{
-    return true;
-}
-
-workspace_request_result_t set_layout_locked(bool) noexcept
-{
-    return workspace_request_result_t::unavailable;
-}
-
-bool operation_pending() noexcept
-{
-    return false;
-}
-
-std::string operation_status() noexcept
-{
-    return kHeadlessUnavailable;
-}
-
-workspace_request_result_t switch_to(workspace_preset_t) noexcept
-{
-    return workspace_request_result_t::unavailable;
-}
-
-workspace_request_result_t save_active_user_layout() noexcept
-{
-    return workspace_request_result_t::unavailable;
-}
-
-workspace_request_result_t restore_builtin(workspace_preset_t) noexcept
-{
-    return workspace_request_result_t::unavailable;
-}
-
-workspace_request_result_t reset_current() noexcept
-{
-    return workspace_request_result_t::unavailable;
-}
-
-workspace_request_result_t activate_safe_layout() noexcept
-{
-    return workspace_request_result_t::unavailable;
-}
-
-workspace_request_result_t open_missing_views() noexcept
-{
-    return workspace_request_result_t::unavailable;
 }
 
 }
@@ -1491,41 +1133,17 @@ void shutdown()
 
 namespace conversations {
 
-void save_current()
-{
-}
+std::string current_id;
+std::uint64_t current_revision = 0;
+std::uint64_t catalog_generation = 0;
+std::string persistence_error;
 
-void load_conversation(const std::string&)
+void save_current()
 {
 }
 
 void new_chat()
 {
-}
-
-void refresh_history()
-{
-}
-
-void delete_conversation(const std::string&, std::uint64_t)
-{
-}
-
-bool set_pinned(const std::string&, bool)
-{
-    return false;
-}
-
-bool fork_conversation(const std::string&, std::string& forked_id)
-{
-    forked_id.clear();
-    return false;
-}
-
-bool export_markdown(const std::string&, const std::string&, std::string& error)
-{
-    error = kHeadlessUnavailable;
-    return false;
 }
 
 void process_store_completion(bool)
@@ -1538,106 +1156,6 @@ bool commit_shutdown(std::string& error)
     return false;
 }
 
-std::shared_ptr<const std::vector<ConversationSummary>> catalog_snapshot()
-{
-    static const auto empty_catalog =
-        std::make_shared<const std::vector<ConversationSummary>>();
-    return empty_catalog;
-}
-
-}
-
-namespace aida::settings_overlay {
-
-void initialize()
-{
-}
-
-void shutdown()
-{
-}
-
-void open()
-{
-}
-
-void toggle()
-{
-}
-
-bool is_open()
-{
-    return false;
-}
-
-void set_active_tab(tab_index_t)
-{
-}
-
-void open_to_provider(const std::string&)
-{
-}
-
-}
-
-namespace aida::auth_view {
-
-void initialize()
-{
-}
-
-void shutdown()
-{
-}
-
-bool is_provider_authenticated(const std::string&)
-{
-    return false;
-}
-
-}
-
-namespace aida::provider_view {
-
-void initialize()
-{
-}
-
-void shutdown()
-{
-}
-
-}
-
-namespace chat_render {
-
-render_result_t render_rich_message(
-    ImDrawList*, ImVec2, float, const std::string&, float, float, float, float,
-    int, float, bool)
-{
-    render_result_t result{};
-    result.action_msg_index = -1;
-    return result;
-}
-
-}
-
-namespace network_view {
-
-bool make_sitemap_artifact(std::uint64_t, artifact_kind_t,
-                           artifact_identity_t& identity,
-                           std::string& unavailable_reason)
-{
-    identity = {};
-    unavailable_reason = kHeadlessUnavailable;
-    return false;
-}
-
-void open_exchange_context(artifact_identity_t, artifact_identity_t,
-                           exchange_context_origin_t, bool)
-{
-}
-
 }
 
 namespace aida::ui {
@@ -1647,14 +1165,6 @@ context_menu_render_result_t render_context_menu_popup(
     const context_menu_open_request_t&, const interaction_context_t&)
 {
     return {};
-}
-
-}
-
-namespace aida::ui::programming_language_views {
-
-void open_rename_dialog()
-{
 }
 
 }

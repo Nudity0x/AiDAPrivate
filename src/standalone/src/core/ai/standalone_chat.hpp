@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
 #include <string>
@@ -21,9 +22,17 @@ void mark_ide_ready_for_mcp_services();
 void start_authorized_mcp_services();
 
 
+struct ai_chat_poll_result_t {
+    bool        any = false;
+    bool        thinking_started = false;
+    bool        content_grew = false;
+    bool        settled = false;
+    std::size_t message_total = 0;
+    bool        ai_busy = false;
+};
+
 void tick_ai_chat();
-void poll_ai_chat();
-void render_tool_approval_dialog();
+ai_chat_poll_result_t poll_ai_chat();
 bool is_ai_busy();
 void chat_request_cancel();
 std::atomic<bool>* chat_cancel_flag();
@@ -53,14 +62,6 @@ unsigned long get_attached_pid();
 
 bool chat_toggle_agent_picker(std::string& error);
 bool chat_toggle_plan_build_agent(std::string& error);
-void chat_render_agent_pill(float anchor_x, float anchor_y, float alpha);
-float chat_agent_pill_width();
-void chat_render_model_pill(float anchor_x, float anchor_y, float alpha);
-float chat_model_pill_width();
-void chat_render_skills_pill(float anchor_x, float anchor_y, float alpha, char* chat_buf, std::size_t chat_buf_size);
-float chat_skills_pill_width();
-void chat_render_mcp_pill(float anchor_x, float anchor_y, float alpha);
-float chat_mcp_pill_width();
 
 namespace aida::automation_ui {
 
@@ -273,12 +274,33 @@ struct surface_capabilities_t {
     std::string background_tasks_reason;
 };
 
+struct chat_message_snapshot_t {
+    std::string text;
+    std::string thinking_text;
+    bool is_user = false;
+    bool has_thinking = false;
+    bool streaming = false;
+    std::int64_t timestamp = 0;
+    int input_tokens = 0;
+    int output_tokens = 0;
+    int cache_read_tokens = 0;
+    int cache_write_tokens = 0;
+    double cost = 0.0;
+    std::string tool_name;
+    bool is_tool_result = false;
+    std::string model_id;
+};
+
 std::size_t message_count();
 message_identity_t message_identity(std::size_t index);
+bool message_snapshot(std::size_t index, chat_message_snapshot_t& out);
 bool message_selection(const message_identity_t& identity, message_selection_t& selection, std::string& reason);
 bool open_message_context(const message_identity_t& identity, context_open_origin_t origin, message_context_request_t& request, std::string& reason);
 action_capability_t message_action_capability(const message_identity_t& identity, message_action_t action);
 action_result_t execute_message_action(const message_identity_t& identity, message_action_t action);
+action_result_t append_user_message(std::string text);
+action_result_t delete_message(const message_identity_t& identity);
+action_result_t truncate_messages_from(const message_identity_t& identity);
 message_window_t bounded_message_window(std::size_t first_visible, std::size_t visible_count, std::size_t overscan = 4);
 tool_approval_snapshot_t tool_approval_snapshot();
 action_result_t respond_to_tool_approval(std::uint64_t identity, bool approve);
@@ -295,15 +317,35 @@ void apply_persisted_evidence(const std::string& session_id,
 bool queue_evidence_for_chat(const std::string& evidence_id, std::string& reason);
 bool queue_evidence_for_agent(const std::string& evidence_id, std::string& reason);
 bool navigate_to_evidence_source(const std::string& evidence_id, std::string& reason);
-void render_evidence_view(float width, float height);
-void render_chat_view(float width, float height);
+void synchronize_evidence_session();
 action_result_t stage_editor_proposal(const message_identity_t& source,
                                       const std::string& proposed_content);
 editor_proposal_snapshot_t editor_proposal_snapshot();
+action_result_t confirm_editor_proposal_review(const editor_proposal_snapshot_t& proposal);
 action_result_t stage_reverse_engineering_proposal(const message_identity_t& source);
 std::shared_ptr<const reverse_engineering_proposal_snapshot_t>
 reverse_engineering_proposal_snapshot();
 void restore_proposal_reviews_for_session(const std::string& session_id);
 void prepare_proposal_reviews_for_shutdown();
+
+void set_stream_notify_hook(std::function<void()> hook);
+void set_tool_approval_notify_hook(std::function<void()> hook);
+void set_chat_inject_notify_hook(std::function<void()> hook);
+void set_message_edit_notify_hook(std::function<void()> hook);
+void set_chat_clipboard_hook(std::function<void(const std::string&)> hook);
+void set_chat_open_view_hook(std::function<void(const std::string& view_id)> hook);
+void set_agent_picker_toggle_hook(std::function<void()> hook);
+void add_ui_shutdown_hook(std::function<void()> hook);
+void run_ui_shutdown_hooks();
+
+void request_chat_scroll_to_bottom();
+std::uint64_t chat_scroll_sequence();
+
+void post_chat_inject(std::string text);
+void request_chat_composer_clear();
+std::uint64_t chat_composer_clear_sequence();
+std::deque<std::string> drain_chat_inject();
+
+bool consume_pending_message_edit(message_identity_t& identity, std::string& text);
 
 }

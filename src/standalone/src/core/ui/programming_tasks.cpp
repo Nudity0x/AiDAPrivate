@@ -1,18 +1,12 @@
 #include "programming_tasks.hpp"
 
-#include "application_view_registry.hpp"
-#include "application_ui_runtime.hpp"
-#include "design_system.hpp"
 #include "task_center.hpp"
 #include "ui_thread_dispatcher.hpp"
-#include "../../preview/studio_semantics.hpp"
 #include "../../helpers/globals.h"
 #include "../infra/executor.hpp"
 #include "../settings/standalone_settings.hpp"
 #include "../settings/settings_persistence_service.hpp"
 
-#include "imgui/imgui.h"
-#include "imgui/imgui_internal.h"
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
@@ -37,17 +31,12 @@
 #include <utility>
 #include <vector>
 
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
 #include <windows.h>
-#endif
 
 namespace aida::ui::programming_tasks {
 namespace {
-
-enum class configuration_kind_t : std::uint8_t { task, launch, test };
-enum class configuration_origin_t : std::uint8_t { user, project };
 
 std::filesystem::path path_from_utf8(std::string_view value) {
 #if defined(__cpp_char8_t)
@@ -67,25 +56,6 @@ std::string path_to_utf8(const std::filesystem::path& value) {
 #endif
 }
 
-struct configuration_t {
-    std::string id;
-    std::string source_id;
-    std::string name;
-    std::string command;
-    std::string cwd;
-    std::string output_channel;
-    std::string problem_matcher;
-    configuration_kind_t kind = configuration_kind_t::task;
-    configuration_origin_t origin = configuration_origin_t::user;
-};
-
-struct resolved_configuration_t {
-    configuration_t source;
-    std::string command;
-    std::string cwd;
-    std::string channel;
-};
-
 struct problem_t {
     std::string path;
     std::string severity;
@@ -101,27 +71,17 @@ struct run_state_t {
     std::atomic<bool> cancellation_requested{false};
     std::atomic<bool> terminal{false};
     std::atomic<std::uint32_t> problem_count{0};
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
     std::mutex process_mutex;
     HANDLE job = INVALID_HANDLE_VALUE;
     HANDLE process = INVALID_HANDLE_VALUE;
     HANDLE output_read = INVALID_HANDLE_VALUE;
-#endif
 };
 
 struct editor_state_t {
     int selected = -1;
-    bool loaded = false;
     bool creating = false;
     std::string draft_id;
     std::string draft_source_id;
-    std::array<char, 128> name{};
-    std::array<char, 8192> command{};
-    std::array<char, 1024> cwd{};
-    std::array<char, 128> channel{};
-    int kind = 0;
-    int matcher = 0;
-    bool delete_requested = false;
     bool dirty = false;
     bool save_in_flight = false;
     bool clear_dirty_on_commit = false;
@@ -136,20 +96,10 @@ struct editor_state_t {
     std::string validation_error;
 };
 
-struct script_run_identity_t {
-    std::string id;
-    std::string source;
-    std::string owner;
-    std::string label;
-    std::uint64_t queued_ms = 0;
-    std::uint64_t snapshot_generation = 0;
-};
-
 struct state_t {
     std::vector<configuration_t> configurations;
     std::string project_root;
     std::string configuration_error;
-    std::string script_action_error;
     std::string selected_id;
     std::vector<std::string> channels;
     std::string selected_channel;
@@ -161,14 +111,8 @@ struct state_t {
     std::atomic<std::uint64_t> configuration_generation{0};
     std::atomic<std::uint64_t> configuration_dispatch_failure_generation{0};
     std::optional<resolved_configuration_t> pending_run;
-    std::optional<script_run_identity_t> selected_script_run;
-    std::array<char, 128> scripts_filter{};
     bool initialized = false;
     bool configuration_loading = false;
-    bool configure_open = false;
-    bool focus_add_configuration = false;
-    int focus_add_assignment_frame = -1;
-    bool run_review_open = false;
     editor_state_t editor;
     std::uint64_t next_run = 1;
     std::uint64_t next_configuration = 1;
@@ -180,16 +124,16 @@ state_t& state() {
     return value;
 }
 
+host_ui_hooks_t& hooks() {
+    static host_ui_hooks_t value;
+    return value;
+}
+
 void ensure_initialized();
 const configuration_t* selected_configuration();
-bool select_configuration(int index, bool persist_selection);
 
 std::uint64_t now_ms() {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    return static_cast<std::uint64_t>(ImGui::GetTime() * 1000.0);
-#else
     return static_cast<std::uint64_t>(GetTickCount64());
-#endif
 }
 
 std::string bounded(std::string value, std::size_t maximum) {
@@ -257,15 +201,6 @@ int matcher_index(const std::string& value) {
     if (value == "gcc") return 2;
     if (value == "generic") return 3;
     return 0;
-}
-
-std::string kind_name(configuration_kind_t value) {
-    switch (value) {
-    case configuration_kind_t::launch: return "launch";
-    case configuration_kind_t::test: return "test";
-    case configuration_kind_t::task: return "task";
-    }
-    return "task";
 }
 
 std::optional<resolved_configuration_t> resolve_configuration(const configuration_t& config,
@@ -470,7 +405,6 @@ void apply_configuration_snapshot(std::uint64_t generation, std::string project_
         [&](const configuration_t& config) { return config.id == store.selected_id; });
     if (selected == store.configurations.end())
         store.selected_id = store.configurations.empty() ? std::string{} : store.configurations.front().id;
-    store.editor.loaded = false;
 }
 
 bool schedule_configuration_reload(bool explicit_reload, std::string& error) {
@@ -501,21 +435,6 @@ bool schedule_configuration_reload(bool explicit_reload, std::string& error) {
     store.configuration_error.clear();
     const std::uint64_t generation = store.configuration_generation.fetch_add(
         1, std::memory_order_acq_rel) + 1;
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    if (user_payload.size() > 64U * 1024U) {
-        store.configuration_loading = false;
-        error = "Studio preview accepts up to 64 KiB of user task configuration fixtures";
-        return false;
-    }
-    std::vector<configuration_t> users;
-    if (!parse_user_configurations(user_payload, users, error)) {
-        store.configuration_loading = false;
-        return false;
-    }
-    apply_configuration_snapshot(generation, project_root, std::move(users), {}, explicit_reload);
-    error.clear();
-    return true;
-#else
     try {
     aida::infra::executor::submission_t submission;
     submission.owner_subsystem = "programming_tasks";
@@ -601,7 +520,6 @@ bool schedule_configuration_reload(bool explicit_reload, std::string& error) {
         store.configuration_error = error;
         return false;
     }
-#endif
 }
 
 bool persist_user_configurations(std::string& error, bool clears_editor_dirty = true) {
@@ -639,15 +557,10 @@ bool persist_user_configurations(std::string& error, bool clears_editor_dirty = 
         error = "Task configuration persistence could not capture an immutable settings snapshot";
         return false;
     }
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    if (clears_editor_dirty) store.editor.dirty = false;
-    store.editor.save_in_flight = false;
-#else
     store.editor.save_in_flight = true;
     store.editor.clear_dirty_on_commit = clears_editor_dirty;
     store.editor.settings_generation = generation;
     store.editor.persistence_payload = payload;
-#endif
     error.clear();
     return true;
 }
@@ -748,11 +661,6 @@ const configuration_t* selected_configuration() {
     return found == store.configurations.end() ? nullptr : &*found;
 }
 
-std::string channel_prefix(const std::string& channel) {
-    return "[Task:" + channel + "] ";
-}
-
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 std::string strip_terminal_sequences(std::string_view value) {
     std::string output;
     output.reserve(value.size());
@@ -793,7 +701,7 @@ void publish_line(const std::shared_ptr<run_state_t>& run, std::string line) {
     for (char& ch : line)
         if (static_cast<unsigned char>(ch) < 32 && ch != '\t') ch = ' ';
     line = bounded(std::move(line), 8192);
-    output_log::push(bottom_tab_t::output, channel_prefix(run->configuration.channel) + line);
+    output_log::push_channel(bottom_tab_t::output, run->configuration.channel, line);
 }
 
 bool current_generation(const std::shared_ptr<run_state_t>& run) {
@@ -861,13 +769,15 @@ void publish_problem(const std::shared_ptr<run_state_t>& run, const problem_t& p
         static_cast<void>(aida::ui_thread::post([path, line, column] {
             const std::string filename = std::filesystem::path(path).filename().string();
             static_cast<void>(file_tabs::request_document_open(path, filename, line - 1, column - 1));
-            static_cast<void>(application_views::open_or_focus(stable_view_id_t("document.code")));
+            if (hooks().open_or_focus_view)
+                hooks().open_or_focus_view("document.code");
         }, "programming_tasks", "problem_focus", "task_center_callback"));
     };
     diagnostic.callbacks.open_log = [channel = run->configuration.channel] {
         static_cast<void>(aida::ui_thread::post([channel] {
             state().selected_channel = channel;
-            static_cast<void>(application_views::open_or_focus(stable_view_id_t("view.output")));
+            if (hooks().open_or_focus_view)
+                hooks().open_or_focus_view("view.output");
         }, "programming_tasks", "problem_open_log", "task_center_callback"));
     };
     diagnostic.callbacks.retry = [id = run->configuration.source.id] {
@@ -883,15 +793,15 @@ void publish_problem(const std::shared_ptr<run_state_t>& run, const problem_t& p
                 return;
             }
             store.pending_run = std::move(*resolved);
-            store.run_review_open = true;
-            static_cast<void>(application_views::open_or_focus(stable_view_id_t("view.output")));
+            if (hooks().present_run_review)
+                hooks().present_run_review();
+            if (hooks().open_or_focus_view)
+                hooks().open_or_focus_view("view.output");
         }, "programming_tasks", "problem_retry", "task_center_callback");
     };
     static_cast<void>(task_center::raise_diagnostic(std::move(diagnostic)));
 }
-#endif
 
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 void consume_line(const std::shared_ptr<run_state_t>& run, std::string line) {
     if (!run) return;
     if (!line.empty() && line.back() == '\r') line.pop_back();
@@ -1123,9 +1033,7 @@ bool execute_process(const std::shared_ptr<run_state_t>& run, DWORD& exit_code, 
     close_process_handles(run);
     return true;
 }
-#endif
 
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 void finish_run(const std::shared_ptr<run_state_t>& run, task_center::task_state_t task_state,
                 const std::string& summary, const std::string& diagnostic = {}) {
     if (!run) return;
@@ -1179,9 +1087,7 @@ void run_worker(const std::shared_ptr<run_state_t>& run) {
             "programming.exit." + run->id);
     }
 }
-#endif
 
-#if !defined(AIDA_IMGUI_STUDIO_PREVIEW)
 void defer_registration_cleanup(const std::shared_ptr<run_state_t>& run, unsigned attempt) {
     if (!run) return;
     const bool posted = aida::ui_thread::post([run, attempt] {
@@ -1198,13 +1104,9 @@ void defer_registration_cleanup(const std::shared_ptr<run_state_t>& run, unsigne
     if (!posted)
         diag::log_tagged("programming_tasks", "registration_cleanup_dispatch_rejected_bounded");
 }
-#endif
+}
 
 operation_result_t start_run(const resolved_configuration_t& configuration) {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    static_cast<void>(configuration);
-    return {false, "External programming tasks require the native AiDA runtime"};
-#else
     auto& store = state();
     auto run = std::make_shared<run_state_t>();
     {
@@ -1281,14 +1183,17 @@ operation_result_t start_run(const resolved_configuration_t& configuration) {
                 return;
             }
             current.pending_run = std::move(*resolved);
-            current.run_review_open = true;
-            static_cast<void>(application_views::open_or_focus(stable_view_id_t("view.output")));
+            if (hooks().present_run_review)
+                hooks().present_run_review();
+            if (hooks().open_or_focus_view)
+                hooks().open_or_focus_view("view.output");
         }, "programming_tasks", "task_retry", "task_center_callback");
     };
     registration.callbacks.focus = [channel = configuration.channel] {
         static_cast<void>(aida::ui_thread::post([channel] {
             state().selected_channel = channel;
-            static_cast<void>(application_views::open_or_focus(stable_view_id_t("view.output")));
+            if (hooks().open_or_focus_view)
+                hooks().open_or_focus_view("view.output");
         }, "programming_tasks", "task_focus", "task_center_callback"));
     };
     registration.callbacks.open_log = registration.callbacks.focus;
@@ -1342,144 +1247,202 @@ operation_result_t start_run(const resolved_configuration_t& configuration) {
         return {false, submitted.reject_reason};
     }
     return {true, {}};
-#endif
 }
 
-void load_editor(int index) {
-    auto& store = state();
-    auto& editor = store.editor;
-    const bool save_in_flight = editor.save_in_flight;
-    editor = {};
-    editor.save_in_flight = save_in_flight;
-    editor.selected = index;
-    editor.loaded = true;
-    if (index < 0 || index >= static_cast<int>(store.configurations.size())) return;
-    const auto& config = store.configurations[static_cast<std::size_t>(index)];
-    std::snprintf(editor.name.data(), editor.name.size(), "%s", config.name.c_str());
-    std::snprintf(editor.command.data(), editor.command.size(), "%s", config.command.c_str());
-    std::snprintf(editor.cwd.data(), editor.cwd.size(), "%s", config.cwd.c_str());
-    std::snprintf(editor.channel.data(), editor.channel.size(), "%s", config.output_channel.c_str());
-    editor.kind = config.kind == configuration_kind_t::launch ? 1 :
+namespace {
+
+configuration_draft_t draft_from_configuration(const configuration_t& config) {
+    configuration_draft_t draft;
+    draft.name = config.name;
+    draft.command = config.command;
+    draft.cwd = config.cwd;
+    draft.channel = config.output_channel;
+    draft.kind = config.kind == configuration_kind_t::launch ? 1 :
         config.kind == configuration_kind_t::test ? 2 : 0;
-    editor.matcher = matcher_index(config.problem_matcher);
+    draft.matcher = matcher_index(config.problem_matcher);
+    return draft;
 }
 
-void load_configuration_draft(configuration_t config) {
+void reset_editor_session(int selected) {
     auto& editor = state().editor;
     const bool save_in_flight = editor.save_in_flight;
     editor = {};
     editor.save_in_flight = save_in_flight;
-    editor.loaded = true;
+    editor.selected = selected;
+}
+
+void begin_draft_session(configuration_t config) {
+    auto& editor = state().editor;
+    const bool save_in_flight = editor.save_in_flight;
+    editor = {};
+    editor.save_in_flight = save_in_flight;
     editor.creating = true;
     editor.draft_id = std::move(config.id);
     editor.draft_source_id = std::move(config.source_id);
-    std::snprintf(editor.name.data(), editor.name.size(), "%s", config.name.c_str());
-    std::snprintf(editor.command.data(), editor.command.size(), "%s", config.command.c_str());
-    std::snprintf(editor.cwd.data(), editor.cwd.size(), "%s", config.cwd.c_str());
-    std::snprintf(editor.channel.data(), editor.channel.size(), "%s", config.output_channel.c_str());
-    editor.kind = config.kind == configuration_kind_t::launch ? 1 :
-        config.kind == configuration_kind_t::test ? 2 : 0;
-    editor.matcher = matcher_index(config.problem_matcher);
     editor.dirty = true;
 }
 
-void add_user_configuration() {
+bool user_configuration_count_ok(std::string& error) {
+    const std::size_t user_count = static_cast<std::size_t>(std::count_if(
+        state().configurations.begin(), state().configurations.end(), [](const configuration_t& config) {
+            return config.origin == configuration_origin_t::user;
+        }));
+    if (user_count >= 64) {
+        error = "User task configurations reached the 64-entry bound";
+        return false;
+    }
+    return true;
+}
+
+std::string mint_draft_id(state_t& store, std::string& source_id) {
+    source_id = "config_" + std::to_string(now_ms()) + "_" +
+        std::to_string(store.next_configuration++);
+    return "user." + source_id;
+}
+
+
+}
+
+void install_host_ui_hooks(host_ui_hooks_t hooks_value) {
+    hooks() = std::move(hooks_value);
+}
+
+void tick() {
+    ensure_initialized();
+}
+
+std::string kind_name(configuration_kind_t value) {
+    switch (value) {
+    case configuration_kind_t::launch: return "launch";
+    case configuration_kind_t::test: return "test";
+    case configuration_kind_t::task: return "task";
+    }
+    return "task";
+}
+
+catalog_snapshot_t catalog_snapshot() {
+    ensure_initialized();
+    auto& store = state();
+    catalog_snapshot_t snapshot;
+    snapshot.configurations = store.configurations;
+    snapshot.selected_id = store.selected_id;
+    snapshot.channels = store.channels;
+    snapshot.selected_channel = store.selected_channel;
+    snapshot.project_root = store.project_root;
+    snapshot.configuration_error = store.configuration_error;
+    snapshot.loading = store.configuration_loading;
+    snapshot.editor_dirty = store.editor.dirty;
+    snapshot.editor_save_in_flight = store.editor.save_in_flight;
+    snapshot.editor_creating = store.editor.creating;
+    snapshot.editor_selected = store.editor.selected;
+    snapshot.editor_validation_error = store.editor.validation_error;
+    snapshot.configuration_generation = store.configuration_generation.load(std::memory_order_acquire);
+    snapshot.catalog_fingerprint = configuration_catalog_fingerprint();
+    snapshot.active_run_count = store.active_count.load(std::memory_order_acquire);
+    snapshot.problem_count = store.retained_problem_count.load(std::memory_order_acquire);
+    return snapshot;
+}
+
+operation_result_t begin_edit(int index, configuration_draft_t& draft) {
+    ensure_initialized();
+    auto& store = state();
+    const operation_result_t selected = select_configuration(index, false);
+    if (!selected.succeeded)
+        return {false, !selected.detail.empty() ? selected.detail
+            : (store.configuration_error.empty()
+                ? "The configuration could not be selected" : store.configuration_error)};
+    reset_editor_session(index);
+    draft = draft_from_configuration(store.configurations[static_cast<std::size_t>(index)]);
+    store.editor.validation_error.clear();
+    return {true, {}};
+}
+
+operation_result_t begin_create(configuration_draft_t& draft) {
+    ensure_initialized();
     auto& store = state();
     if (store.editor.save_in_flight) {
         store.editor.validation_error = "Wait for task configuration persistence to finish";
-        return;
+        return {false, store.editor.validation_error};
     }
     if (store.editor.dirty) {
         store.editor.validation_error = "Save, revert, or discard the current configuration before creating another";
-        return;
+        return {false, store.editor.validation_error};
     }
-    const std::size_t user_count = static_cast<std::size_t>(std::count_if(
-        store.configurations.begin(), store.configurations.end(), [](const configuration_t& config) {
-            return config.origin == configuration_origin_t::user;
-        }));
-    if (user_count >= 64) {
-        store.editor.validation_error = "User task configurations reached the 64-entry bound";
-        return;
-    }
-    const std::string source_id = "config_" + std::to_string(now_ms()) + "_" +
-        std::to_string(store.next_configuration++);
-    configuration_t draft;
-    draft.id = "user." + source_id;
-    draft.source_id = source_id;
-    draft.name = "New Task";
-    draft.cwd = "${workspaceFolder}";
-    draft.problem_matcher = "none";
-    draft.origin = configuration_origin_t::user;
-    load_configuration_draft(std::move(draft));
+    if (!user_configuration_count_ok(store.editor.validation_error))
+        return {false, store.editor.validation_error};
+    configuration_t next;
+    next.id = mint_draft_id(store, next.source_id);
+    next.name = "New Task";
+    next.cwd = "${workspaceFolder}";
+    next.problem_matcher = "none";
+    next.origin = configuration_origin_t::user;
+    draft = draft_from_configuration(next);
+    begin_draft_session(std::move(next));
     store.configuration_error.clear();
+    return {true, {}};
 }
 
-void duplicate_configuration(int index) {
+operation_result_t begin_duplicate(int index, configuration_draft_t& draft) {
+    ensure_initialized();
     auto& store = state();
     if (store.editor.save_in_flight) {
         store.configuration_error = "Wait for task configuration persistence to finish";
-        return;
+        return {false, store.configuration_error};
     }
     if (store.editor.dirty) {
         store.configuration_error = "Save, revert, or discard the current configuration before duplicating another";
-        return;
+        return {false, store.configuration_error};
     }
-    const std::size_t user_count = static_cast<std::size_t>(std::count_if(
-        store.configurations.begin(), store.configurations.end(), [](const configuration_t& config) {
-            return config.origin == configuration_origin_t::user;
-        }));
-    if (user_count >= 64) {
-        store.configuration_error = "User task configurations reached the 64-entry bound";
-        return;
-    }
+    if (!user_configuration_count_ok(store.configuration_error))
+        return {false, store.configuration_error};
     if (index < 0 || index >= static_cast<int>(store.configurations.size())) {
         store.configuration_error = "Select a configuration to duplicate";
-        return;
+        return {false, store.configuration_error};
     }
     configuration_t copy = store.configurations[static_cast<std::size_t>(index)];
-    copy.source_id = "config_" + std::to_string(now_ms()) + "_" +
-        std::to_string(store.next_configuration++);
-    copy.id = "user." + copy.source_id;
+    copy.id = mint_draft_id(store, copy.source_id);
     copy.name = bounded(copy.name + " Copy", 127);
     copy.origin = configuration_origin_t::user;
-    load_configuration_draft(std::move(copy));
-    store.configure_open = true;
+    draft = draft_from_configuration(copy);
+    begin_draft_session(std::move(copy));
     store.configuration_error.clear();
+    return {true, {}};
 }
 
-bool save_editor() {
+operation_result_t save_draft(const configuration_draft_t& draft) {
+    ensure_initialized();
     auto& store = state();
     auto& editor = store.editor;
     if (!editor.creating &&
         (editor.selected < 0 || editor.selected >= static_cast<int>(store.configurations.size()))) {
         editor.validation_error = "Select a user configuration first";
-        return false;
+        return {false, editor.validation_error};
     }
     if (!editor.creating &&
         store.configurations[static_cast<std::size_t>(editor.selected)].origin !=
             configuration_origin_t::user) {
         editor.validation_error = "Project configurations are read-only here; edit .aida/tasks.json in the code editor";
-        return false;
+        return {false, editor.validation_error};
     }
-    const std::string name = trim(editor.name.data());
-    const std::string command = trim(editor.command.data());
-    const std::string channel = trim(editor.channel.data());
+    const std::string name = trim(draft.name);
+    const std::string command = trim(draft.command);
+    const std::string channel = trim(draft.channel);
     if (name.empty() || command.empty()) {
         editor.validation_error = "Name and command are required";
-        return false;
+        return {false, editor.validation_error};
     }
-    if (!control_free(name) || !control_free(command) || !control_free(editor.cwd.data()) ||
-        !control_free(editor.channel.data())) {
+    if (!control_free(name) || !control_free(command) || !control_free(draft.cwd) ||
+        !control_free(draft.channel)) {
         editor.validation_error = "Configuration fields cannot contain control characters or line breaks";
-        return false;
+        return {false, editor.validation_error};
     }
     if (channel.size() > 96) {
         editor.validation_error = "Output channel names may contain at most 96 bytes";
-        return false;
+        return {false, editor.validation_error};
     }
     if (channel.empty() && name.size() > 96) {
         editor.validation_error = "Names longer than 96 bytes require an explicit Output channel";
-        return false;
+        return {false, editor.validation_error};
     }
     configuration_t candidate;
     if (editor.creating) {
@@ -1491,11 +1454,11 @@ bool save_editor() {
     }
     candidate.name = bounded(name, 127);
     candidate.command = bounded(command, 8192);
-    candidate.cwd = bounded(trim(editor.cwd.data()), 1024);
+    candidate.cwd = bounded(trim(draft.cwd), 1024);
     candidate.output_channel = channel;
-    candidate.kind = editor.kind == 1 ? configuration_kind_t::launch :
-        editor.kind == 2 ? configuration_kind_t::test : configuration_kind_t::task;
-    candidate.problem_matcher = matcher_name(editor.matcher);
+    candidate.kind = draft.kind == 1 ? configuration_kind_t::launch :
+        draft.kind == 2 ? configuration_kind_t::test : configuration_kind_t::task;
+    candidate.problem_matcher = matcher_name(draft.matcher);
     const bool creating = editor.creating;
     const std::string previous_selected_id = store.selected_id;
     std::optional<configuration_t> previous_configuration;
@@ -1522,7 +1485,7 @@ bool save_editor() {
                 std::move(*previous_configuration);
         }
         store.selected_id = previous_selected_id;
-        return false;
+        return {false, editor.validation_error};
     }
     if (editor.save_in_flight) {
         editor.persistence_created = creating;
@@ -1536,32 +1499,57 @@ bool save_editor() {
     editor.draft_id.clear();
     editor.draft_source_id.clear();
     editor.validation_error = editor.save_in_flight ? "Saving task configuration..." : std::string{};
-    return true;
+    return {true, {}};
 }
 
-void delete_selected_configuration() {
+void discard_draft() {
+    reset_editor_session(-1);
+}
+
+void note_draft_edited() {
+    auto& editor = state().editor;
+    if (editor.selected >= 0 || editor.creating)
+        editor.dirty = true;
+}
+
+operation_result_t revert_draft(configuration_draft_t& draft) {
+    ensure_initialized();
+    auto& store = state();
+    const int index = store.editor.selected;
+    if (index < 0 || index >= static_cast<int>(store.configurations.size()))
+        return {false, "Select a configuration to revert"};
+    reset_editor_session(index);
+    draft = draft_from_configuration(store.configurations[static_cast<std::size_t>(index)]);
+    return {true, {}};
+}
+
+operation_result_t delete_selected_configuration() {
+    ensure_initialized();
     auto& store = state();
     if (store.editor.save_in_flight) {
         store.editor.validation_error = "Wait for task configuration persistence to finish";
-        return;
+        return {false, store.editor.validation_error};
     }
     const int index = store.editor.selected;
-    if (index < 0 || index >= static_cast<int>(store.configurations.size())) return;
+    if (index < 0 || index >= static_cast<int>(store.configurations.size()))
+        return {false, "Select a user configuration first"};
     const auto& config = store.configurations[static_cast<std::size_t>(index)];
-    if (config.origin != configuration_origin_t::user) return;
+    if (config.origin != configuration_origin_t::user)
+        return {false, "Project task configurations must be edited in .aida/tasks.json"};
     {
         std::unique_lock<std::mutex> lock(store.mutex, std::try_to_lock);
         if (!lock.owns_lock()) {
             store.editor.validation_error = "Programming task state is busy; try again";
-            return;
+            return {false, store.editor.validation_error};
         }
         const auto active = store.active_runs.find(config.id);
         if (active != store.active_runs.end() && active->second &&
             !active->second->terminal.load(std::memory_order_acquire)) {
             store.editor.validation_error = "Stop the active run before deleting its configuration";
-            return;
+            return {false, store.editor.validation_error};
         }
     }
+    const std::string removed_id = config.id;
     store.configurations.erase(store.configurations.begin() + index);
     store.selected_id = store.configurations.empty() ? std::string{} :
         store.configurations[static_cast<std::size_t>((std::min)(index,
@@ -1569,395 +1557,46 @@ void delete_selected_configuration() {
     std::string error;
     store.editor.dirty = true;
     if (!persist_user_configurations(error)) store.configuration_error = std::move(error);
-    load_editor(-1);
+    reset_editor_session(-1);
+    const bool removed = std::none_of(store.configurations.begin(), store.configurations.end(),
+        [&](const configuration_t& configuration) { return configuration.id == removed_id; });
+    return removed ? operation_result_t{true, {}}
+        : operation_result_t{false, "The configuration could not be removed"};
 }
 
-struct configuration_add_focus_target_t {
-    ImGuiWindow* window = nullptr;
-    ImGuiID id = 0;
-    bool valid = false;
-};
-
-configuration_add_focus_target_t render_configuration_editor() {
-    auto& store = state();
-    auto& editor = store.editor;
-    configuration_add_focus_target_t add_focus_target;
-    if (!editor.loaded) {
-        const auto found = std::find_if(store.configurations.begin(), store.configurations.end(),
-            [&](const configuration_t& config) { return config.id == store.selected_id; });
-        load_editor(found == store.configurations.end() ? -1 :
-            static_cast<int>(std::distance(store.configurations.begin(), found)));
-    }
-    const float area_height = (std::max)(180.0f, ImGui::GetContentRegionAvail().y - 48.0f);
-    const float list_width = (std::min)(220.0f,
-        (std::max)(150.0f, ImGui::GetContentRegionAvail().x * 0.34f));
-    ImGui::BeginChild("##task_configuration_list", ImVec2(list_width, area_height), true);
-    for (int index = 0; index < static_cast<int>(store.configurations.size()); ++index) {
-        const auto& config = store.configurations[static_cast<std::size_t>(index)];
-        const std::string label = config.name + (config.origin == configuration_origin_t::project
-            ? "  [Project]" : "  [User]");
-        if (ImGui::Selectable((label + "###task.config." + config.id).c_str(), editor.selected == index)) {
-            if (select_configuration(index, false)) load_editor(index);
-        }
-    }
-    ImGui::Separator();
-    const bool focus_add = store.focus_add_configuration && store.configurations.empty() &&
-        !store.configuration_loading && !editor.save_in_flight;
-    ImGuiWindow* const add_window = ImGui::GetCurrentWindow();
-    const ImGuiID add_id = add_window->GetID("Add User Configuration");
-    const int current_frame = ImGui::GetFrameCount();
-    const ImGuiContext& context_before = *GImGui;
-    const bool prior_focus_commit_completed = focus_add &&
-        store.focus_add_assignment_frame >= 0 &&
-        current_frame > store.focus_add_assignment_frame;
-    const bool focus_survived_completed_frame = prior_focus_commit_completed &&
-        context_before.NavWindow == add_window && context_before.NavId == add_id;
-    const bool explicit_tab_navigation = focus_add &&
-        ImGui::IsKeyPressed(ImGuiKey_Tab, false);
-    if ((prior_focus_commit_completed && !focus_survived_completed_frame) ||
-        explicit_tab_navigation) {
-        store.focus_add_configuration = false;
-        store.focus_add_assignment_frame = -1;
-    }
-    add_focus_target.window = add_window;
-    add_focus_target.id = add_id;
-    add_focus_target.valid = store.focus_add_configuration;
-    const bool add_activated = ImGui::Button(
-        "Add User Configuration", ImVec2(-1.0f, 0.0f));
-    if (add_activated) add_user_configuration();
-    if (add_activated && editor.creating) {
-        store.focus_add_configuration = false;
-        store.focus_add_assignment_frame = -1;
-    }
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    static_cast<void>(aida::preview::semantics::register_last_item(
-        "aida.dialog.programming.task.configurations.add", "dialog-action", false,
-        store.configuration_loading || editor.save_in_flight));
-#endif
-    ImGui::EndChild();
-    ImGui::SameLine();
-    ImGui::BeginChild("##task_configuration_editor", ImVec2(0.0f, area_height), false);
-    const bool catalog_selection = editor.selected >= 0 &&
-        editor.selected < static_cast<int>(store.configurations.size());
-    const bool valid_selection = editor.creating || catalog_selection;
-    const bool read_only = catalog_selection &&
-        store.configurations[static_cast<std::size_t>(editor.selected)].origin ==
-            configuration_origin_t::project;
-    if (!valid_selection) {
-        ImGui::TextDisabled("Select a configuration or create a user configuration.");
-        ImGui::EndChild();
-        return add_focus_target;
-    }
-    if (read_only) {
-        ImGui::TextDisabled("Project-owned: .aida/tasks.json");
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Open Configuration File")) {
-            const auto path = std::filesystem::path(file_browser::current_dir) / ".aida" / "tasks.json";
-            file_browser::open_path(path.string());
-            static_cast<void>(application_views::open_or_focus(stable_view_id_t("document.code")));
-        }
-    }
-    if (editor.creating)
-        ImGui::TextDisabled("Unsaved user configuration");
-    ImGui::BeginDisabled(read_only || editor.save_in_flight);
-    ImGui::SetNextItemWidth(-1.0f);
-    editor.dirty |= ImGui::InputText("Name", editor.name.data(), editor.name.size());
-    ImGui::SetNextItemWidth(-1.0f);
-    editor.dirty |= ImGui::InputTextMultiline("Command", editor.command.data(), editor.command.size(), ImVec2(-1.0f, 88.0f));
-    ImGui::SetNextItemWidth(-1.0f);
-    editor.dirty |= ImGui::InputText("Working directory", editor.cwd.data(), editor.cwd.size());
-    ImGui::SetNextItemWidth(-1.0f);
-    editor.dirty |= ImGui::InputText("Output channel", editor.channel.data(), editor.channel.size());
-    const char* kinds[] = {"Task", "Launch", "Test"};
-    editor.dirty |= ImGui::Combo("Kind", &editor.kind, kinds, 3);
-    const char* matchers[] = {"None", "MSVC", "GCC/Clang", "Generic file:line:column"};
-    editor.dirty |= ImGui::Combo("Problem matcher", &editor.matcher, matchers, 4);
-    ImGui::TextDisabled("Variables: ${workspaceFolder}, ${file}, ${fileDirname}");
-    if (!editor.validation_error.empty())
-        ImGui::TextColored(ImVec4(0.95f, 0.4f, 0.35f, 1.0f), "%s", editor.validation_error.c_str());
-    ImGui::BeginDisabled(editor.save_in_flight || !editor.dirty);
-    if (ImGui::Button(editor.save_in_flight ? "Saving..." : "Save Configuration"))
-        static_cast<void>(save_editor());
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    if (editor.creating) {
-        if (ImGui::Button("Discard Draft")) load_editor(-1);
-    } else if (ImGui::Button("Delete...")) {
-        editor.delete_requested = true;
-    }
-    if (!editor.creating && editor.dirty && catalog_selection &&
-        !store.configurations[static_cast<std::size_t>(editor.selected)].command.empty()) {
-        ImGui::SameLine();
-        if (ImGui::Button("Revert Edits")) load_editor(editor.selected);
-    }
-    ImGui::EndDisabled();
-    ImGui::EndChild();
-    constexpr const char* delete_popup =
-        "Delete Task Configuration###programming.task.configuration.delete";
-    if (editor.delete_requested && !ImGui::IsPopupOpen(delete_popup))
-        design::open_dialog("programming.task.configuration.delete",
-            "Delete Task Configuration");
-    if (design::begin_dialog("programming.task.configuration.delete",
-            "Delete Task Configuration", ImVec2(520.0f, 270.0f),
-            ImVec2(400.0f, 230.0f))) {
-        const bool selected_user = editor.selected >= 0 &&
-            editor.selected < static_cast<int>(store.configurations.size()) &&
-            store.configurations[static_cast<std::size_t>(editor.selected)].origin ==
-                configuration_origin_t::user;
-        const float footer_height = design::dialog_footer_reserve_height(
-            "Delete Configuration", "Cancel");
-        design::begin_dialog_body("programming_task_configuration_delete_body",
-            footer_height);
-        design::text(design::text_role_t::title,
-            "Delete this user task configuration?");
-        ImGui::TextWrapped("This removes only the saved configuration. Existing output and diagnostics remain.");
-        if (!editor.validation_error.empty())
-            design::text(design::text_role_t::caption,
-                editor.validation_error.c_str());
-        design::end_dialog_body();
-        const auto footer = design::dialog_footer(
-            "programming_task_configuration_delete_footer",
-            "Delete Configuration", selected_user && !editor.save_in_flight, true);
-        if (footer.confirmed) {
-            const std::string retained_id = selected_user
-                ? store.configurations[static_cast<std::size_t>(editor.selected)].id
-                : std::string{};
-            delete_selected_configuration();
-            const bool removed = !retained_id.empty() &&
-                std::none_of(store.configurations.begin(), store.configurations.end(),
-                    [&](const configuration_t& configuration) {
-                        return configuration.id == retained_id;
-                    });
-            if (removed) {
-                editor.delete_requested = false;
-                ImGui::CloseCurrentPopup();
-            }
-        } else if (footer.cancelled) {
-            editor.delete_requested = false;
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
-    return add_focus_target;
-}
-
-}
-
-void render_output_controls() {
+std::optional<resolved_configuration_t> pending_run_snapshot() {
     ensure_initialized();
-    auto& store = state();
-    ImGui::PushID("programming_tasks");
-    const bool compact = ImGui::GetContentRegionAvail().x < 720.0f;
-    const configuration_t* selected = selected_configuration();
-    const char* preview = selected ? selected->name.c_str() : "No task configuration";
-    ImGui::SetNextItemWidth((std::min)(260.0f, (std::max)(120.0f, ImGui::GetContentRegionAvail().x * 0.28f)));
-    ImGui::BeginDisabled(store.editor.save_in_flight || store.configuration_loading);
-    if (ImGui::BeginCombo("##task_configuration", preview)) {
-        for (const auto& config : store.configurations) {
-            const bool active = config.id == store.selected_id;
-            if (ImGui::Selectable((config.name + "###task.select." + config.id).c_str(), active)) {
-                store.selected_id = config.id;
-                store.editor.loaded = false;
-                std::string persistence_error;
-                if (!persist_user_configurations(persistence_error, false))
-                    store.configuration_error = std::move(persistence_error);
-            }
-        }
-        if (store.configurations.empty()) ImGui::TextDisabled("No explicit user or project configurations");
-        ImGui::EndCombo();
-    }
-    ImGui::EndDisabled();
-    if (!compact) ImGui::SameLine();
-	const int output_tab = static_cast<int>(bottom_tab_t::output);
-	const auto run_action = application_ui::present_output_action(
-		output_tab, "programming.task.run");
-	ImGui::BeginDisabled(!run_action.enabled);
-    if (ImGui::SmallButton("Run..."))
-		static_cast<void>(application_ui::execute_output_action(output_tab,
-            "programming.task.run", action_invocation_source_t::toolbar));
-    ImGui::EndDisabled();
-	design::tooltip_for_last_item(
-		run_action.enabled ? run_action.description.c_str() : run_action.disabled_reason.c_str(),
-		run_action.shortcut.empty() ? nullptr : run_action.shortcut.c_str());
-    ImGui::SameLine();
-	const auto configure_action = application_ui::present_output_action(
-		output_tab, "programming.task.configure");
-	ImGui::BeginDisabled(!configure_action.enabled);
-    if (ImGui::SmallButton("Configure..."))
-		static_cast<void>(application_ui::execute_output_action(output_tab,
-            "programming.task.configure", action_invocation_source_t::toolbar));
-	ImGui::EndDisabled();
-	design::tooltip_for_last_item(configure_action.enabled
-		? configure_action.description.c_str() : configure_action.disabled_reason.c_str(),
-		configure_action.shortcut.empty() ? nullptr : configure_action.shortcut.c_str());
-    if (has_active_run()) {
-        ImGui::SameLine();
-		const auto cancel_action = application_ui::present_output_action(
-			output_tab, "programming.task.cancel");
-		ImGui::BeginDisabled(!cancel_action.enabled);
-        if (ImGui::SmallButton("Cancel"))
-			static_cast<void>(application_ui::execute_output_action(output_tab,
-                "programming.task.cancel", action_invocation_source_t::toolbar));
-        ImGui::EndDisabled();
-		design::tooltip_for_last_item(cancel_action.enabled
-			? cancel_action.description.c_str() : cancel_action.disabled_reason.c_str(),
-			cancel_action.shortcut.empty() ? nullptr : cancel_action.shortcut.c_str());
-    }
-    const std::size_t problems = problem_count();
-    if (problems != 0) {
-        ImGui::SameLine();
-        const std::string label = "Problems (" + std::to_string(problems) + ")";
-		const auto problems_action = application_ui::present_output_action(
-			output_tab, "programming.show_problems");
-		ImGui::BeginDisabled(!problems_action.enabled);
-        if (ImGui::SmallButton(label.c_str()))
-			static_cast<void>(application_ui::execute_output_action(output_tab,
-                "programming.show_problems", action_invocation_source_t::toolbar));
-		ImGui::EndDisabled();
-		design::tooltip_for_last_item(problems_action.enabled
-			? problems_action.description.c_str() : problems_action.disabled_reason.c_str(),
-			problems_action.shortcut.empty() ? nullptr : problems_action.shortcut.c_str());
-    }
-    if (!compact) ImGui::SameLine();
-    const char* channel_preview = store.selected_channel.empty() ? "All Output" : store.selected_channel.c_str();
-    ImGui::SetNextItemWidth((std::min)(220.0f, (std::max)(110.0f, ImGui::GetContentRegionAvail().x)));
-    if (ImGui::BeginCombo("##task_output_channel", channel_preview)) {
-        if (ImGui::Selectable("All Output", store.selected_channel.empty())) store.selected_channel.clear();
-        for (const auto& channel : store.channels)
-            if (ImGui::Selectable(channel.c_str(), store.selected_channel == channel))
-                store.selected_channel = channel;
-        ImGui::EndCombo();
-    }
-    if (!store.configuration_error.empty()) {
-        ImGui::SameLine();
-        ImGui::TextColored(ImVec4(0.95f, 0.4f, 0.35f, 1.0f), "Configuration error");
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("%s", store.configuration_error.c_str());
-    }
-    if (store.configuration_loading) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("Loading configurations...");
-    }
-    ImGui::PopID();
+    return state().pending_run;
 }
 
-const char* task_state_label(task_center::task_state_t value) {
-    switch (value) {
-    case task_center::task_state_t::running: return "Running";
-    case task_center::task_state_t::cancellation_requested: return "Cancelling";
-    case task_center::task_state_t::completed: return "Completed";
-    case task_center::task_state_t::partial: return "Partial";
-    case task_center::task_state_t::cancelled: return "Cancelled";
-    case task_center::task_state_t::failed: return "Failed";
-    case task_center::task_state_t::timed_out: return "Timed out";
-    case task_center::task_state_t::interrupted: return "Interrupted";
-    case task_center::task_state_t::queued: return "Queued";
-    }
-    return "Unknown";
-}
-
-bool active_task_state(task_center::task_state_t value) {
-    return value == task_center::task_state_t::queued ||
-        value == task_center::task_state_t::running ||
-        value == task_center::task_state_t::cancellation_requested;
-}
-
-script_run_identity_t script_run_identity(const task_center::task_snapshot_t& task,
-                                          std::uint64_t snapshot_generation) {
-    return {task.id, task.source, task.owner, task.label, task.queued_ms,
-        snapshot_generation};
-}
-
-bool same_script_run(const task_center::task_snapshot_t& task,
-                     const script_run_identity_t& identity) {
-    return task.id == identity.id && task.source == identity.source &&
-        task.owner == identity.owner && task.label == identity.label &&
-        task.queued_ms == identity.queued_ms;
-}
-
-const task_center::task_snapshot_t* find_script_run(
-    const task_center::immutable_snapshot_t& snapshot,
-    const script_run_identity_t& identity) {
-    const auto found = std::find_if(snapshot.tasks.begin(), snapshot.tasks.end(),
-        [&](const task_center::task_snapshot_t& task) {
-            return same_script_run(task, identity);
-        });
-    return found == snapshot.tasks.end() ? nullptr : &*found;
-}
-
-enum class script_run_action_t : std::uint8_t { cancel, retry, focus, open_log };
-
-std::string script_run_action_unavailable_reason(
-    const task_center::task_snapshot_t* task, script_run_action_t action) {
-    if (!task)
-        return "The retained run was removed or replaced; select the run again";
-    switch (action) {
-    case script_run_action_t::cancel:
-        if (task->security_critical)
-            return "Security-critical tasks cannot be cancelled";
-        if (task->state == task_center::task_state_t::cancellation_requested)
-            return "Cancellation is already pending owner confirmation";
-        if (!active_task_state(task->state))
-            return "Only an active run can be cancelled";
-        if (!task->cancellable)
-            return "This run owner did not register safe cancellation";
+std::string configuration_run_gate_reason(const configuration_t& retained,
+                                          configuration_run_gate_t gate) {
+    ensure_initialized();
+    std::unique_lock<std::mutex> lock(state().mutex, std::try_to_lock);
+    if (!lock.owns_lock())
+        return "Programming task state is busy; try again";
+    const auto active = state().active_runs.find(retained.id);
+    const bool running = active != state().active_runs.end() && active->second &&
+        !active->second->terminal.load(std::memory_order_acquire);
+    if (running)
+        return gate == configuration_run_gate_t::delete_
+            ? "Stop the retained configuration's active run before deleting it"
+            : "The retained configuration is already running";
+    if (gate == configuration_run_gate_t::delete_)
         return {};
-    case script_run_action_t::retry:
-        if (active_task_state(task->state))
-            return "An active run cannot be retried";
-        if (!task->retryable)
-            return "This run owner did not register retry";
-        return {};
-    case script_run_action_t::focus:
-        return task->focusable ? std::string{} :
-            "This run owner did not register an output focus target";
-    case script_run_action_t::open_log:
-        return task->log_available ? std::string{} :
-            "This run has no retained log target";
-    }
-    return "The run action is unavailable";
+    std::string resolution_error;
+    if (!resolve_configuration(retained, resolution_error))
+        return resolution_error;
+    return {};
 }
 
-action_handler_result_t invoke_script_run_action(const script_run_identity_t& identity,
-                                                 script_run_action_t action) {
-    const auto current = task_center::snapshot();
-    const auto* task = current && current->generation == identity.snapshot_generation
-        ? find_script_run(*current, identity) : nullptr;
-    const std::string unavailable = current
-        ? current->generation == identity.snapshot_generation
-            ? script_run_action_unavailable_reason(task, action)
-            : "The immutable Task Center snapshot changed; reopen the run context"
-        : "Task Center state is unavailable";
-    if (!unavailable.empty()) {
-        state().script_action_error = unavailable;
-        return action_handler_result_t::failed(unavailable);
-    }
-    bool accepted = false;
-    switch (action) {
-    case script_run_action_t::cancel:
-        accepted = task_center::request_cancel(identity.id);
-        break;
-    case script_run_action_t::retry:
-        accepted = task_center::retry(identity.id);
-        break;
-    case script_run_action_t::focus:
-        accepted = task_center::focus(identity.id);
-        break;
-    case script_run_action_t::open_log:
-        accepted = task_center::open_log(identity.id);
-        break;
-    }
-    state().script_action_error = accepted ? std::string{} :
-        "Task Center rejected the action because the retained run state changed";
-    return accepted ? action_handler_result_t::completed()
-        : action_handler_result_t::failed(state().script_action_error);
+void clear_pending_run() {
+    state().pending_run.reset();
 }
 
-bool contains_case_insensitive(std::string_view value, std::string_view query) {
-    if (query.empty()) return true;
-    return std::search(value.begin(), value.end(), query.begin(), query.end(),
-        [](unsigned char left, unsigned char right) {
-            return std::tolower(left) == std::tolower(right);
-        }) != value.end();
+void set_selected_channel(const std::string& channel) {
+    ensure_initialized();
+    state().selected_channel = channel;
 }
 
 std::string redacted_command(std::string value) {
@@ -1988,57 +1627,36 @@ int configuration_index(std::string_view id) {
         static_cast<int>(std::distance(configurations.begin(), found));
 }
 
-namespace {
-
-bool select_configuration(int index, bool persist_selection) {
+operation_result_t select_configuration(int index, bool persist_selection) {
     auto& store = state();
-    if (index < 0 || index >= static_cast<int>(store.configurations.size())) return false;
+    if (index < 0 || index >= static_cast<int>(store.configurations.size()))
+        return {false, "The configuration index is out of range"};
     const std::string& next_id = store.configurations[static_cast<std::size_t>(index)].id;
-    if (next_id == store.selected_id) return true;
+    if (next_id == store.selected_id) return {true, {}};
     if (store.editor.dirty || store.editor.save_in_flight) {
         store.configuration_error = store.editor.save_in_flight
             ? "Wait for task configuration persistence before changing selection"
             : "Save or revert the edited configuration before changing selection";
-        return false;
+        return {false, store.configuration_error};
     }
     store.selected_id = next_id;
-    store.editor.loaded = false;
-    if (!persist_selection) return true;
+    if (!persist_selection) return {true, {}};
     std::string error;
     if (!persist_user_configurations(error, false)) store.configuration_error = std::move(error);
-    return true;
+    return {true, {}};
 }
 
-}
-
-void open_selected_configuration_editor() {
-    auto& store = state();
-    const int index = configuration_index(store.selected_id);
-    if (index < 0) {
-        store.configuration_error = "Select a configuration to edit";
-        return;
-    }
-    load_editor(index);
-    store.configure_open = true;
-}
-
-void open_project_configuration_file() {
+operation_result_t open_project_configuration_file() {
     auto& store = state();
     if (store.project_root.empty()) {
         store.configuration_error = "Open a code workspace before opening .aida/tasks.json";
-        return;
+        return {false, store.configuration_error};
     }
     const auto path = std::filesystem::path(store.project_root) / ".aida" / "tasks.json";
     file_browser::open_path(path.string());
-    static_cast<void>(application_views::open_or_focus(stable_view_id_t("document.code")));
-}
-
-void retain_task_action_result(bool accepted, const char* failure) {
-    state().script_action_error = accepted ? std::string{} : std::string(failure);
-}
-
-void retain_operation_result(operation_result_t result) {
-    state().script_action_error = result.succeeded ? std::string{} : std::move(result.detail);
+    if (hooks().open_or_focus_view)
+        hooks().open_or_focus_view("document.code");
+    return {true, {}};
 }
 
 std::uint64_t fingerprint_append(std::uint64_t hash, std::string_view value) {
@@ -2095,624 +1713,6 @@ capability_state_t validate_configuration_identity(const configuration_t& retain
     return capability_state_t::available();
 }
 
-application_ui::retained_entity_action_t retained_script_action(const char* id,
-    std::string unavailable, std::function<action_handler_result_t()> invoke) {
-    application_ui::retained_entity_action_t action;
-    action.action_id = id;
-    action.capability = unavailable.empty() ? capability_state_t::available()
-        : capability_state_t::unavailable(std::move(unavailable));
-    action.invoke = std::move(invoke);
-    return action;
-}
-
-void open_configuration_context(int index, context_menu_open_origin_t origin) {
-    auto& store = state();
-    if (index < 0 || index >= static_cast<int>(store.configurations.size())) return;
-    const configuration_t retained = store.configurations[static_cast<std::size_t>(index)];
-    const std::uint64_t generation = store.configuration_generation.load(
-        std::memory_order_acquire);
-    const std::uint64_t catalog_fingerprint = configuration_catalog_fingerprint();
-    const std::string project_root = store.project_root;
-    const auto validate = [retained, generation, catalog_fingerprint, project_root] {
-        return validate_configuration_identity(retained, generation,
-            catalog_fingerprint, project_root);
-    };
-    auto invoke_selected = [retained, validate](auto&& operation) {
-        const auto current = validate();
-        if (!current.enabled)
-            return action_handler_result_t::failed(current.disabled_reason);
-        const int retained_index = configuration_index(retained.id);
-        if (!select_configuration(retained_index, false))
-            return action_handler_result_t::failed(state().configuration_error.empty()
-                ? "The retained task configuration could not be selected" : state().configuration_error);
-        return operation(retained_index);
-    };
-    application_ui::retained_entity_context_t context;
-    context.owner_id = "programming.scripts.configuration";
-    context.entity_id = retained.id;
-    context.entity_generation = generation ^ catalog_fingerprint;
-    context.active_view = stable_view_id_t("view.ai.scripts");
-    context.validate_identity = validate;
-    std::string run_unavailable;
-    if (store.configuration_loading)
-        run_unavailable = "Programming configurations are loading";
-    else if (store.editor.save_in_flight && store.selected_id != retained.id)
-        run_unavailable = "Wait for task configuration persistence before changing selection";
-    else if (store.editor.dirty && store.selected_id != retained.id)
-        run_unavailable = "Save or revert the edited configuration before changing selection";
-    else {
-        std::unique_lock<std::mutex> lock(store.mutex, std::try_to_lock);
-        if (!lock.owns_lock()) run_unavailable = "Programming task state is busy; try again";
-        else {
-            const auto active = store.active_runs.find(retained.id);
-            if (active != store.active_runs.end() && active->second &&
-                !active->second->terminal.load(std::memory_order_acquire))
-                run_unavailable = "The retained configuration is already running";
-        }
-        if (run_unavailable.empty()) {
-            std::string resolution_error;
-            if (!resolve_configuration(retained, resolution_error))
-                run_unavailable = std::move(resolution_error);
-        }
-    }
-    context.actions.push_back(retained_script_action(
-        "programming.configuration.run_review", run_unavailable,
-        [invoke_selected] {
-            return invoke_selected([](int) {
-                const auto result = request_run_selected();
-                return result.succeeded ? action_handler_result_t::completed()
-                    : action_handler_result_t::failed(result.detail);
-            });
-        }));
-    std::string edit_unavailable = retained.origin == configuration_origin_t::project &&
-        project_root.empty() ? "Open a code workspace before opening .aida/tasks.json" : std::string{};
-    if (edit_unavailable.empty() && store.editor.save_in_flight && store.selected_id != retained.id)
-        edit_unavailable = "Wait for task configuration persistence before changing selection";
-    if (edit_unavailable.empty() && store.editor.dirty && store.selected_id != retained.id)
-        edit_unavailable = "Save or revert the edited configuration before changing selection";
-    context.actions.push_back(retained_script_action(
-        "programming.configuration.open_edit", edit_unavailable,
-        [invoke_selected, retained] {
-            return invoke_selected([retained](int retained_index) {
-                if (retained.origin == configuration_origin_t::project) {
-                    const auto path = std::filesystem::path(state().project_root) /
-                        ".aida" / "tasks.json";
-                    file_browser::open_path(path.string());
-                    const auto opened = application_views::open_or_focus(
-                        stable_view_id_t("document.code"));
-                    return opened.ok() ? action_handler_result_t::completed()
-                        : action_handler_result_t::failed(opened.detail);
-                }
-                load_editor(retained_index);
-                state().configure_open = true;
-                return action_handler_result_t::completed();
-            });
-        }));
-    const std::size_t user_count = static_cast<std::size_t>(std::count_if(
-        store.configurations.begin(), store.configurations.end(), [](const configuration_t& item) {
-            return item.origin == configuration_origin_t::user;
-        }));
-    const std::string selection_unavailable = store.editor.save_in_flight
-        ? "Wait for task configuration persistence before changing selection"
-        : store.editor.dirty
-            ? "Save, revert, or discard the edited configuration before changing selection"
-            : std::string{};
-    context.actions.push_back(retained_script_action(
-        "programming.configuration.duplicate", !selection_unavailable.empty()
-            ? selection_unavailable : user_count >= 64
-                ? "User task configurations reached the 64-entry bound" : std::string{},
-        [invoke_selected] {
-            return invoke_selected([](int retained_index) {
-                duplicate_configuration(retained_index);
-                return state().editor.creating && !state().editor.draft_id.empty()
-                    ? action_handler_result_t::completed()
-                    : action_handler_result_t::failed(state().configuration_error.empty()
-                        ? "The retained configuration could not be duplicated"
-                        : state().configuration_error);
-            });
-        }));
-    std::string delete_unavailable = !selection_unavailable.empty()
-        ? selection_unavailable : retained.origin == configuration_origin_t::user
-            ? std::string{} : "Project task configurations must be edited in .aida/tasks.json";
-    if (delete_unavailable.empty()) {
-        std::unique_lock<std::mutex> lock(store.mutex, std::try_to_lock);
-        if (!lock.owns_lock())
-            delete_unavailable = "Programming task state is busy; try again";
-        else {
-            const auto active = store.active_runs.find(retained.id);
-            if (active != store.active_runs.end() && active->second &&
-                !active->second->terminal.load(std::memory_order_acquire))
-                delete_unavailable = "Stop the retained configuration's active run before deleting it";
-        }
-    }
-    context.actions.push_back(retained_script_action(
-        "programming.configuration.delete_review", delete_unavailable,
-        [invoke_selected, retained] {
-            return invoke_selected([retained](int retained_index) {
-                if (retained.origin != configuration_origin_t::user)
-                    return action_handler_result_t::failed(
-                        "Project task configurations cannot be deleted from user settings");
-                load_editor(retained_index);
-                state().editor.delete_requested = true;
-                state().configure_open = true;
-                return action_handler_result_t::completed();
-            });
-        }));
-    application_ui::open_retained_entity_context_menu(std::move(context), origin);
-}
-
-void open_script_run_context(const task_center::task_snapshot_t& task,
-                             std::uint64_t snapshot_generation,
-                             context_menu_open_origin_t origin) {
-    const script_run_identity_t identity = script_run_identity(task, snapshot_generation);
-    application_ui::retained_entity_context_t context;
-    context.owner_id = "programming.scripts.run";
-    context.entity_id = task.id;
-    context.entity_generation = snapshot_generation;
-    context.active_view = stable_view_id_t("view.ai.scripts");
-    context.validate_identity = [identity] {
-        const auto current = task_center::snapshot();
-        return current && current->generation == identity.snapshot_generation &&
-                find_script_run(*current, identity)
-            ? capability_state_t::available()
-            : capability_state_t::unavailable(
-                "The immutable Task Center snapshot or retained run identity changed; reopen the context menu");
-    };
-    const auto append = [&](const char* id, script_run_action_t action) {
-        context.actions.push_back(retained_script_action(id,
-            script_run_action_unavailable_reason(&task, action),
-            [identity, action] { return invoke_script_run_action(identity, action); }));
-    };
-    append("programming.run.cancel", script_run_action_t::cancel);
-    append("programming.run.retry_review", script_run_action_t::retry);
-    append("programming.run.focus", script_run_action_t::focus);
-    append("programming.run.open_log", script_run_action_t::open_log);
-    application_ui::open_retained_entity_context_menu(std::move(context), origin);
-}
-
-void render_automation_scripts() {
-    ensure_initialized();
-    auto& store = state();
-    ImGui::PushID("automation.scripts");
-    ImGui::SetNextItemWidth((std::min)(320.0f,
-        (std::max)(140.0f, ImGui::GetContentRegionAvail().x * 0.32f)));
-    ImGui::InputTextWithHint("###aida.automation.scripts.filter", "Filter scripts...",
-        store.scripts_filter.data(), store.scripts_filter.size());
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    static_cast<void>(aida::preview::semantics::register_last_item(
-        "aida.automation.scripts.filter", "script-filter"));
-#endif
-    ImGui::SameLine();
-    ImGui::BeginDisabled(store.configuration_loading || store.editor.save_in_flight);
-    if (ImGui::SmallButton("New###aida.automation.scripts.new")) {
-        add_user_configuration();
-        store.configure_open = true;
-    }
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    static_cast<void>(aida::preview::semantics::register_last_item(
-        "aida.automation.scripts.new", "script-action", false,
-        store.configuration_loading || store.editor.save_in_flight));
-#endif
-    ImGui::SameLine();
-    if (ImGui::SmallButton("Reload###aida.automation.scripts.reload")) {
-        std::string error;
-        if (!schedule_configuration_reload(true, error)) store.configuration_error = std::move(error);
-    }
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-    static_cast<void>(aida::preview::semantics::register_last_item(
-        "aida.automation.scripts.reload", "script-action", false,
-        store.configuration_loading || store.editor.save_in_flight));
-#endif
-    ImGui::EndDisabled();
-    if (store.configuration_loading) {
-        ImGui::SameLine();
-        ImGui::TextDisabled("Loading configurations...");
-    }
-    if (!store.configuration_error.empty()) {
-        ImGui::TextColored(ImVec4(0.95f, 0.4f, 0.35f, 1.0f), "%s",
-            store.configuration_error.c_str());
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Retry load###aida.automation.scripts.retry_load")) {
-            std::string error;
-            if (!schedule_configuration_reload(true, error)) store.configuration_error = std::move(error);
-        }
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-        static_cast<void>(aida::preview::semantics::register_last_item(
-            "aida.automation.scripts.retry-load", "script-action"));
-#endif
-        if (!store.configurations.empty())
-            ImGui::TextDisabled("The retained configuration snapshot may be stale.");
-    }
-    if (!store.script_action_error.empty())
-        ImGui::TextColored(ImVec4(0.95f, 0.4f, 0.35f, 1.0f), "%s",
-            store.script_action_error.c_str());
-    const auto snapshot = task_center::snapshot();
-    if (!snapshot) {
-        ImGui::TextDisabled("Task state is loading...");
-        ImGui::PopID();
-        return;
-    }
-
-    std::vector<int> visible_configurations;
-    visible_configurations.reserve(store.configurations.size());
-    const std::string_view filter(store.scripts_filter.data());
-    for (int index = 0; index < static_cast<int>(store.configurations.size()); ++index) {
-        const auto& config = store.configurations[static_cast<std::size_t>(index)];
-        if (contains_case_insensitive(config.name, filter) ||
-            contains_case_insensitive(config.command, filter) ||
-            contains_case_insensitive(kind_name(config.kind), filter))
-            visible_configurations.push_back(index);
-    }
-
-    const bool compact = ImGui::GetContentRegionAvail().x < 760.0f;
-    const float catalog_extent = compact ? (std::min)(210.0f,
-        ImGui::GetContentRegionAvail().y * 0.36f) : (std::min)(310.0f,
-        ImGui::GetContentRegionAvail().x * 0.34f);
-    ImGui::BeginChild("###aida.automation.scripts.catalog",
-        compact ? ImVec2(0.0f, catalog_extent) : ImVec2(catalog_extent, 0.0f), true);
-    ImGui::BeginDisabled(store.configuration_loading);
-    if (store.configuration_loading && store.configurations.empty()) {
-        ImGui::TextDisabled("Awaiting configuration snapshot...");
-    } else if (store.configurations.empty()) {
-        ImGui::TextDisabled("No script configurations");
-        ImGui::TextWrapped("Create a reviewed user configuration or add .aida/tasks.json to the open workspace.");
-        if (ImGui::Button("Create Configuration###aida.automation.scripts.empty.create")) {
-            add_user_configuration();
-            store.configure_open = true;
-        }
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-        static_cast<void>(aida::preview::semantics::register_last_item(
-            "aida.automation.scripts.empty-create", "script-action", false,
-            store.configuration_loading));
-#endif
-    } else if (visible_configurations.empty()) {
-        ImGui::TextDisabled("No configurations match the filter");
-    }
-    int pending_duplicate_index = -1;
-    int keyboard_focused_configuration = -1;
-    for (const int index : visible_configurations) {
-        const auto& config = store.configurations[static_cast<std::size_t>(index)];
-        const bool selected = config.id == store.selected_id;
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-        const std::string semantic_token = aida::preview::semantics::entity_token(config.id);
-#endif
-        const std::string label = config.name + "###aida.automation.scripts.config." + config.id;
-        if (ImGui::Selectable(label.c_str(), selected)) static_cast<void>(select_configuration(index, true));
-        if (ImGui::IsItemFocused()) keyboard_focused_configuration = index;
-        if (ImGui::IsItemClicked(ImGuiMouseButton_Right))
-            open_configuration_context(index, context_menu_open_origin_t::pointer);
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-        static_cast<void>(aida::preview::semantics::register_last_item(
-            "aida.automation.scripts.config." + semantic_token, "script-configuration",
-            false, store.configuration_loading));
-#endif
-        if (compact) {
-            ImGui::SameLine();
-            if (ImGui::SmallButton(("...###aida.automation.scripts.more." + config.id).c_str()))
-                open_configuration_context(index, context_menu_open_origin_t::pointer);
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-            static_cast<void>(aida::preview::semantics::register_last_item(
-                "aida.automation.scripts.more." + semantic_token, "script-context-action",
-                false, store.configuration_loading));
-#endif
-        }
-    }
-    const bool configuration_menu_key = ImGui::IsKeyPressed(ImGuiKey_Menu, false);
-    const bool configuration_shift_f10 = ImGui::GetIO().KeyShift &&
-        ImGui::IsKeyPressed(ImGuiKey_F10, false);
-    if (keyboard_focused_configuration >= 0 &&
-        (configuration_menu_key || configuration_shift_f10))
-        open_configuration_context(keyboard_focused_configuration,
-            configuration_menu_key ? context_menu_open_origin_t::menu_key
-                                   : context_menu_open_origin_t::shift_f10);
-    ImGui::EndDisabled();
-    application_ui::render_retained_entity_context_menu(
-        "programming.scripts.configuration");
-    ImGui::EndChild();
-    if (!compact) ImGui::SameLine();
-
-    ImGui::BeginChild("###aida.automation.scripts.detail", ImVec2(0.0f, 0.0f), false);
-    const configuration_t* selected = selected_configuration();
-    if (!selected) {
-        ImGui::TextDisabled("Select a script configuration to inspect it");
-    } else {
-        ImGui::TextUnformatted(selected->name.c_str());
-        ImGui::SameLine();
-        ImGui::TextDisabled("%s / %s", kind_name(selected->kind).c_str(),
-            selected->origin == configuration_origin_t::project ? "project" : "user");
-        const std::string unavailable = run_unavailable_reason();
-        ImGui::BeginDisabled(!unavailable.empty());
-        if (ImGui::Button("Run with Review...###aida.automation.scripts.run"))
-            retain_operation_result(request_run_selected());
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-        static_cast<void>(aida::preview::semantics::register_last_item(
-            "aida.automation.scripts.run", "script-action", false, !unavailable.empty()));
-#endif
-        ImGui::EndDisabled();
-        design::tooltip_for_last_item(unavailable.empty()
-            ? "Resolve and review the exact process command before execution" : unavailable.c_str());
-        ImGui::SameLine();
-        if (ImGui::Button(selected->origin == configuration_origin_t::project
-                ? "Open Source###aida.automation.scripts.edit"
-                : "Edit...###aida.automation.scripts.edit")) {
-            if (selected->origin == configuration_origin_t::project) open_project_configuration_file();
-            else open_selected_configuration_editor();
-        }
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-        static_cast<void>(aida::preview::semantics::register_last_item(
-            "aida.automation.scripts.edit", "script-action"));
-#endif
-        ImGui::SameLine();
-        if (ImGui::Button("Duplicate...###aida.automation.scripts.duplicate"))
-            pending_duplicate_index = configuration_index(selected->id);
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-        static_cast<void>(aida::preview::semantics::register_last_item(
-            "aida.automation.scripts.duplicate", "script-action"));
-#endif
-        ImGui::Separator();
-        ImGui::Text("Source: %s", selected->origin == configuration_origin_t::project
-            ? ".aida/tasks.json" : "User settings");
-        ImGui::Text("Scope: %s", store.project_root.empty()
-            ? "No workspace" : store.project_root.c_str());
-        const std::string command = redacted_command(selected->command);
-        ImGui::TextWrapped("Command: %s", command.c_str());
-        ImGui::TextWrapped("Arguments: included in the reviewed command line; secret-like values are redacted here");
-        ImGui::TextWrapped("Working directory: %s", selected->cwd.empty()
-            ? "Inherited from AiDA" : selected->cwd.c_str());
-        ImGui::Text("Output: %s", selected->output_channel.empty()
-            ? selected->name.c_str() : selected->output_channel.c_str());
-        ImGui::Text("Problem matcher: %s", selected->problem_matcher.c_str());
-        ImGui::TextWrapped("Environment: inherited by the canonical executor; credentials are never expanded in this catalog");
-        ImGui::TextDisabled("Execution is approval-gated and runs outside the debugger in a cancellable process job.");
-    }
-    if (pending_duplicate_index >= 0) duplicate_configuration(pending_duplicate_index);
-
-    ImGui::Spacing();
-    ImGui::SeparatorText("Runs");
-    std::vector<const task_center::task_snapshot_t*> tasks;
-    tasks.reserve(snapshot->tasks.size());
-    for (auto it = snapshot->tasks.rbegin(); it != snapshot->tasks.rend(); ++it)
-        if (it->source == "programming.config") tasks.push_back(&*it);
-    std::optional<script_run_identity_t> pointer_context_run;
-    std::optional<script_run_identity_t> keyboard_focused_run;
-    if (tasks.empty()) {
-        ImGui::TextDisabled("No script runs in this session");
-    } else if (ImGui::BeginTable("###aida.automation.scripts.runs", 4,
-            ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersInnerV |
-            ImGuiTableFlags_ScrollY | ImGuiTableFlags_Resizable,
-            ImVec2(0.0f, (std::max)(130.0f, ImGui::GetContentRegionAvail().y)))) {
-        ImGui::TableSetupColumn("Script", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("State", ImGuiTableColumnFlags_WidthFixed, 92.f);
-        ImGui::TableSetupColumn("Stage", ImGuiTableColumnFlags_WidthStretch);
-        ImGui::TableSetupColumn("Actions", ImGuiTableColumnFlags_WidthFixed, 128.f);
-        ImGui::TableHeadersRow();
-        const float row_height = ImGui::GetTextLineHeightWithSpacing() * 3.0f;
-        ImGuiListClipper clipper;
-        clipper.Begin(static_cast<int>(tasks.size()), row_height);
-        while (clipper.Step()) for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
-            const auto& task = *tasks[static_cast<std::size_t>(row)];
-            const script_run_identity_t identity = script_run_identity(task, snapshot->generation);
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-            const std::string task_token = aida::preview::semantics::entity_token(task.id);
-#endif
-            ImGui::PushID(task.id.c_str());
-            ImGui::TableNextRow(ImGuiTableRowFlags_None, row_height);
-            ImGui::TableSetColumnIndex(0);
-            const bool selected = store.selected_script_run &&
-                same_script_run(task, *store.selected_script_run);
-            ImGui::Selectable("###run-row", selected,
-                ImGuiSelectableFlags_SpanAllColumns | ImGuiSelectableFlags_AllowOverlap,
-                ImVec2(0.0f, row_height));
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-            static_cast<void>(aida::preview::semantics::register_last_item(
-                "aida.automation.scripts.run." + task_token, "script-run"));
-#endif
-            if (ImGui::IsItemFocused()) {
-                store.selected_script_run = identity;
-                keyboard_focused_run = identity;
-            }
-            if (ImGui::IsItemActivated() || ImGui::IsItemClicked(ImGuiMouseButton_Left))
-                store.selected_script_run = identity;
-            if (ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
-                store.selected_script_run = identity;
-                pointer_context_run = identity;
-            }
-            ImGui::SameLine(0.0f, 0.0f);
-            ImGui::TextUnformatted(task.label.c_str());
-            ImGui::TableSetColumnIndex(1);
-            ImGui::TextUnformatted(task_state_label(task.state));
-            ImGui::TableSetColumnIndex(2);
-            ImGui::TextUnformatted(task.stage.c_str());
-            if (ImGui::IsItemHovered() && !task.stage.empty())
-                ImGui::SetTooltip("%s", task.stage.c_str());
-            if (!task.result_summary.empty()) ImGui::TextDisabled("%s", task.result_summary.c_str());
-            if (task.progress >= 0.0f) ImGui::ProgressBar(task.progress, ImVec2(-1.0f, 0.0f));
-            ImGui::TableSetColumnIndex(3);
-            bool previous_action = false;
-            const std::string cancel_unavailable = script_run_action_unavailable_reason(
-                &task, script_run_action_t::cancel);
-            if (cancel_unavailable.empty() && ImGui::SmallButton("Cancel"))
-                invoke_script_run_action(identity, script_run_action_t::cancel);
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-            if (cancel_unavailable.empty()) static_cast<void>(aida::preview::semantics::register_last_item(
-                "aida.automation.scripts.run-cancel." + task_token, "script-run-action"));
-#endif
-            previous_action = cancel_unavailable.empty();
-            const std::string retry_unavailable = script_run_action_unavailable_reason(
-                &task, script_run_action_t::retry);
-            if (retry_unavailable.empty()) {
-                if (previous_action) ImGui::SameLine();
-                if (ImGui::SmallButton("Retry"))
-                    invoke_script_run_action(identity, script_run_action_t::retry);
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-                static_cast<void>(aida::preview::semantics::register_last_item(
-                    "aida.automation.scripts.run-retry." + task_token, "script-run-action"));
-#endif
-                previous_action = true;
-            }
-            const std::string focus_unavailable = script_run_action_unavailable_reason(
-                &task, script_run_action_t::focus);
-            if (focus_unavailable.empty()) {
-                if (previous_action) ImGui::SameLine();
-                if (ImGui::SmallButton("Focus"))
-                    invoke_script_run_action(identity, script_run_action_t::focus);
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-                static_cast<void>(aida::preview::semantics::register_last_item(
-                    "aida.automation.scripts.run-focus." + task_token, "script-run-action"));
-#endif
-            }
-            ImGui::PopID();
-        }
-        ImGui::EndTable();
-    }
-    if (pointer_context_run) {
-        const auto* retained = find_script_run(*snapshot, *pointer_context_run);
-        if (retained)
-            open_script_run_context(*retained, snapshot->generation,
-                context_menu_open_origin_t::pointer);
-    }
-    const bool run_menu_key = ImGui::IsKeyPressed(ImGuiKey_Menu, false);
-    const bool run_shift_f10 = ImGui::GetIO().KeyShift &&
-        ImGui::IsKeyPressed(ImGuiKey_F10, false);
-    if (keyboard_focused_run && (run_menu_key || run_shift_f10)) {
-        store.selected_script_run = *keyboard_focused_run;
-        const auto* retained = find_script_run(*snapshot, *keyboard_focused_run);
-        if (retained)
-            open_script_run_context(*retained, snapshot->generation,
-                run_menu_key ? context_menu_open_origin_t::menu_key
-                             : context_menu_open_origin_t::shift_f10);
-    }
-    application_ui::render_retained_entity_context_menu("programming.scripts.run");
-    ImGui::EndChild();
-    ImGui::PopID();
-}
-
-void render_modals() {
-    ensure_initialized();
-    auto& store = state();
-    if (store.configure_open) {
-        design::open_dialog("programming.task.configurations",
-            "Programming Task Configurations");
-        if (store.configurations.empty()) {
-            store.focus_add_configuration = true;
-            store.focus_add_assignment_frame = -1;
-        }
-        store.configure_open = false;
-    }
-    if (design::begin_dialog("programming.task.configurations",
-            "Programming Task Configurations", ImVec2(860.0f, 540.0f),
-            ImVec2(620.0f, 420.0f))) {
-        const float footer_height = design::dialog_footer_reserve_height(
-            "Close", nullptr);
-        design::begin_dialog_body("programming_task_configurations_body",
-            footer_height);
-        ImGui::TextUnformatted("Explicit Programming Tasks and Launches");
-        ImGui::TextDisabled("AiDA runs only configurations you define here or in .aida/tasks.json. This does not invoke RE Run Target.");
-        ImGui::Separator();
-        ImGui::BeginDisabled(store.configuration_loading);
-        const configuration_add_focus_target_t add_focus_target =
-            render_configuration_editor();
-        ImGui::EndDisabled();
-        ImGui::Separator();
-        if (ImGui::Button("Reload User and Project Configurations")) {
-            std::string error;
-            if (!schedule_configuration_reload(true, error)) store.configuration_error = std::move(error);
-        }
-        const bool can_close = !store.editor.dirty && !store.editor.save_in_flight;
-        if (!can_close)
-            ImGui::TextDisabled("Save, revert, or delete the edited user configuration before closing.");
-        design::end_dialog_body();
-        const auto footer = design::dialog_footer(
-            "programming_task_configurations_footer", "Close",
-            can_close, false, nullptr, true, false);
-        bool closing = false;
-        if ((footer.confirmed || footer.cancelled) && can_close) {
-            store.focus_add_configuration = false;
-            store.focus_add_assignment_frame = -1;
-            ImGui::CloseCurrentPopup();
-            closing = true;
-        }
-        if (!closing && store.focus_add_configuration && add_focus_target.valid &&
-            add_focus_target.window && add_focus_target.id != 0 &&
-            store.configurations.empty() && !store.configuration_loading &&
-            !store.editor.save_in_flight) {
-            ImGui::FocusWindow(add_focus_target.window);
-            ImGui::SetFocusID(add_focus_target.id, add_focus_target.window);
-            store.focus_add_assignment_frame = ImGui::GetFrameCount();
-        }
-        ImGui::EndPopup();
-    }
-    if (store.run_review_open && store.pending_run) {
-        design::open_dialog("programming.task.run.review",
-            "Review Programming Run");
-        store.run_review_open = false;
-    }
-    if (design::begin_dialog("programming.task.run.review",
-            "Review Programming Run", ImVec2(680.0f, 390.0f),
-            ImVec2(500.0f, 320.0f))) {
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-        const bool can_run = false;
-#else
-        const bool can_run = static_cast<bool>(store.pending_run);
-#endif
-        const float footer_height = design::dialog_footer_reserve_height(
-            "Run", "Cancel");
-        design::begin_dialog_body("programming_task_run_review_body",
-            footer_height);
-        if (!store.pending_run) {
-            ImGui::TextUnformatted("The selected configuration is no longer available.");
-        } else {
-            const auto& pending = *store.pending_run;
-            ImGui::Text("%s: %s", pending.source.kind == configuration_kind_t::launch
-                ? "Launch" : pending.source.kind == configuration_kind_t::test ? "Test" : "Task",
-                pending.source.name.c_str());
-            ImGui::Separator();
-            ImGui::TextWrapped("Command: %s", pending.command.c_str());
-            ImGui::TextWrapped("Working directory: %s", pending.cwd.empty() ? "Inherited from AiDA" : pending.cwd.c_str());
-            ImGui::Text("Output channel: %s", pending.channel.c_str());
-            ImGui::Text("Problem matcher: %s", pending.source.problem_matcher.c_str());
-            ImGui::TextDisabled("The process and its descendants run outside AiDA's debugger. Cancel/close terminates the complete process tree. This is separate from RE Run Target.");
-            if (!store.configuration_error.empty())
-                ImGui::TextColored(ImVec4(0.95f, 0.4f, 0.35f, 1.0f), "%s",
-                    store.configuration_error.c_str());
-#if defined(AIDA_IMGUI_STUDIO_PREVIEW)
-            ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.25f, 1.0f),
-                "External process execution is disabled in the Studio compatibility runtime.");
-#endif
-        }
-        design::end_dialog_body();
-        const auto footer = design::dialog_footer(
-            "programming_task_run_review_footer", "Run", can_run, false);
-        if (footer.confirmed && store.pending_run) {
-            const auto pending = *store.pending_run;
-            const auto result = start_run(pending);
-            if (result.succeeded) {
-                store.pending_run.reset();
-                ImGui::CloseCurrentPopup();
-            } else {
-                store.configuration_error = result.detail;
-            }
-        } else if (footer.cancelled) {
-            store.pending_run.reset();
-            ImGui::CloseCurrentPopup();
-        }
-        ImGui::EndPopup();
-    }
-}
-
-bool output_line_visible(std::string_view line) {
-    ensure_initialized();
-    const std::string channel = state().selected_channel;
-    if (channel.empty()) return true;
-    const std::string prefix = channel_prefix(channel);
-    return line.size() >= prefix.size() && line.compare(0, prefix.size(), prefix) == 0;
-}
-
-std::string selected_output_channel() {
-    ensure_initialized();
-    return state().selected_channel;
-}
-
 operation_result_t request_run_selected() {
     const configuration_t* config = selected_configuration();
     if (!config) return {false, run_unavailable_reason()};
@@ -2733,8 +1733,10 @@ operation_result_t request_run_selected() {
     if (!resolved) return {false, error};
     state().configuration_error.clear();
     state().pending_run = std::move(*resolved);
-    state().run_review_open = true;
-    static_cast<void>(application_views::open_or_focus(stable_view_id_t("view.output")));
+    if (hooks().present_run_review)
+        hooks().present_run_review();
+    if (hooks().open_or_focus_view)
+        hooks().open_or_focus_view("view.output");
     return {true, {}};
 }
 
@@ -2752,8 +1754,10 @@ operation_result_t request_run_selected_for_file(const std::string& path, bool l
     if (!resolved) return {false, error};
     state().configuration_error.clear();
     state().pending_run = std::move(*resolved);
-    state().run_review_open = true;
-    static_cast<void>(application_views::open_or_focus(stable_view_id_t("view.output")));
+    if (hooks().present_run_review)
+        hooks().present_run_review();
+    if (hooks().open_or_focus_view)
+        hooks().open_or_focus_view("view.output");
     return {true, {}};
 }
 
@@ -2769,8 +1773,10 @@ operation_result_t request_test_selected_for_file(const std::string& path) {
     if (!resolved) return {false, error};
     state().configuration_error.clear();
     state().pending_run = std::move(*resolved);
-    state().run_review_open = true;
-    static_cast<void>(application_views::open_or_focus(stable_view_id_t("view.output")));
+    if (hooks().present_run_review)
+        hooks().present_run_review();
+    if (hooks().open_or_focus_view)
+        hooks().open_or_focus_view("view.output");
     return {true, {}};
 }
 
@@ -2821,7 +1827,6 @@ operation_result_t request_retry_last() {
     if (found == state().configurations.end())
         return {false, "The configuration used by the last run no longer exists"};
     state().selected_id = found->id;
-    state().editor.loaded = false;
     std::string persistence_error;
     if (!persist_user_configurations(persistence_error, false))
         state().configuration_error = std::move(persistence_error);
@@ -2830,8 +1835,10 @@ operation_result_t request_retry_last() {
 
 operation_result_t open_configurations() {
     ensure_initialized();
-    state().configure_open = true;
-    static_cast<void>(application_views::open_or_focus(stable_view_id_t("view.output")));
+    if (hooks().present_configuration_editor)
+        hooks().present_configuration_editor();
+    if (hooks().open_or_focus_view)
+        hooks().open_or_focus_view("view.output");
     return {true, {}};
 }
 

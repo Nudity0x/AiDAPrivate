@@ -8,9 +8,6 @@
 #include <unordered_set>
 #include <vector>
 
-#include "imgui/imgui.h"
-#include "../ui/theme.hpp"
-
 namespace syntax {
 
 
@@ -431,29 +428,5 @@ inline void tokenize(std::string_view src, const language_def_t& lang,
     }
 }
 
-
-inline void get_token_colors(ImU32 colors[(int)token_type::COUNT],
-                              float ax, float ay, float az, float alpha)
-{
-    (void)ax; (void)ay; (void)az;
-    const auto& t = aida::ui::resolved();
-
-    colors[(int)token_type::keyword]       = aida::ui::with_alpha(t.syn_keyword,       alpha);
-    colors[(int)token_type::type_name]     = aida::ui::with_alpha(t.syn_type,          alpha);
-    colors[(int)token_type::string_lit]    = aida::ui::with_alpha(t.syn_string,        alpha);
-    colors[(int)token_type::number]        = aida::ui::with_alpha(t.syn_number,        alpha);
-    colors[(int)token_type::comment_line]  = aida::ui::with_alpha(t.syn_comment,       alpha);
-    colors[(int)token_type::comment_block] = aida::ui::with_alpha(t.syn_comment,       alpha);
-    colors[(int)token_type::preprocessor]  = aida::ui::with_alpha(t.syn_preprocessor,  alpha);
-    colors[(int)token_type::operator_sym]  = aida::ui::with_alpha(t.syn_operator,      alpha);
-    colors[(int)token_type::function_call] = aida::ui::with_alpha(t.syn_function,      alpha);
-    colors[(int)token_type::identifier]    = aida::ui::with_alpha(t.syn_identifier,    alpha);
-    colors[(int)token_type::whitespace]    = IM_COL32(0, 0, 0, 0);
-    colors[(int)token_type::punctuation]   = aida::ui::with_alpha(t.syn_operator,      alpha * 0.85f);
-    colors[(int)token_type::decorator]     = aida::ui::with_alpha(t.syn_preprocessor,  alpha);
-    colors[(int)token_type::boolean_lit]   = aida::ui::with_alpha(t.syn_number,        alpha);
-    colors[(int)token_type::register_name] = aida::ui::with_alpha(t.syn_register,      alpha);
-    colors[(int)token_type::directive]     = aida::ui::with_alpha(t.syn_preprocessor,  alpha);
-}
 
 }
